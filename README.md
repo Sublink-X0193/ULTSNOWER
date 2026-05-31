@@ -25,6 +25,36 @@ python -m merchant_portal_server
 
 默认监听 `127.0.0.1:8020`。
 
+## 本地联调快速启动
+
+如果中央 Bridge 没有现成 API key/设备，可先启动带测试数据的 Bridge：
+
+```powershell
+python tools\run_seeded_bridge.py
+```
+
+另开一个终端初始化商户测试数据并启动商户服务器：
+
+```powershell
+python tools\seed_dev_merchant.py
+python -m merchant_portal_server
+```
+
+默认后台：
+
+```text
+http://127.0.0.1:8020/merchant-admin/login
+admin / admin123456
+```
+
+测试充值卡：
+
+```text
+TEST-60
+TEST-180
+TEST-600
+```
+
 ## 测试
 
 ```powershell

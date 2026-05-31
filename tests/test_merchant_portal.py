@@ -327,3 +327,22 @@ def test_admin_settings_privacy_announcement_and_maintenance(app_and_bridge):
     blocked = client.post("/api/orders", json={"requested_minutes": 5, "team_code": "MAINT"})
     assert blocked.status_code == 503
     assert blocked.json()["error"] == "maintenance_mode"
+
+
+def test_html_pages_escape_user_controlled_values(app_and_bridge):
+    app, _bridge = app_and_bridge
+    client = TestClient(app)
+    register_and_login(client, "<b>evil</b>")
+    app.state.service.add_recharge_card("ESC-10", minutes=10)
+    client.post("/api/recharge/redeem", json={"code": "ESC-10"})
+    client.post("/api/orders", json={"requested_minutes": 5, "team_code": "<TAG>"})
+
+    home = client.get("/").text
+    current = client.get("/orders/current").text
+    history = client.get("/orders/history").text
+
+    assert "<b>evil</b>" not in home
+    assert "&lt;b&gt;evil&lt;/b&gt;" in home
+    assert "<TAG>" not in current
+    assert "&lt;TAG&gt;" in current
+    assert "<TAG>" not in history

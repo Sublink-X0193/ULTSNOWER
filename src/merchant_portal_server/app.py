@@ -115,12 +115,12 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
             banner += "<div style='background:#fff3cd;border:1px solid #ffda6a;padding:10px;border-radius:8px;margin-top:8px'>维护模式已开启：暂时不能新下单。</div>"
         body = f"""
         {banner}
-        <h2>你好，{customer['username']}</h2>
+        <h2>你好，{_escape(customer['username'])}</h2>
         <p>分钟余额：<b>{customer['balance_minutes']}</b></p>
-        <p>中央容量：<b>{capacity.get('capacity_label')}</b> / 可用：{capacity.get('available')}</p>
+        <p>中央容量：<b>{_escape(capacity.get('capacity_label'))}</b> / 可用：{_escape(capacity.get('available'))}</p>
         <p><a href="/orders/new">下单</a> · <a href="/recharge">卡密充值</a> · <a href="/orders/current">当前订单</a> · <a href="/orders/history">历史订单</a></p>
         <form method="post" action="/logout"><button>登出</button></form>
-        <pre>{current or '暂无当前订单'}</pre>
+        {_pre(current or '暂无当前订单')}
         """
         return HTMLResponse(_layout("商户首页", body))
 
@@ -178,11 +178,11 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
 
     @app.get("/orders/current", response_class=HTMLResponse)
     def current_order_page(customer: dict[str, Any] = Depends(current_customer)) -> HTMLResponse:
-        return HTMLResponse(_layout("当前订单", f"<pre>{service.public_order(service.current_order(customer['id'])) or '暂无当前订单'}</pre><p><a href='/'>返回</a></p>"))
+        return HTMLResponse(_layout("当前订单", f"{_pre(service.public_order(service.current_order(customer['id'])) or '暂无当前订单')}<p><a href='/'>返回</a></p>"))
 
     @app.get("/orders/history", response_class=HTMLResponse)
     def history_page(customer: dict[str, Any] = Depends(current_customer)) -> HTMLResponse:
-        return HTMLResponse(_layout("历史订单", "<pre>" + repr(service.public_orders(service.order_history(customer["id"]))) + "</pre><p><a href='/'>返回</a></p>"))
+        return HTMLResponse(_layout("历史订单", _pre(service.public_orders(service.order_history(customer["id"]))) + "<p><a href='/'>返回</a></p>"))
 
     @app.get("/merchant-admin/login", response_class=HTMLResponse)
     def admin_login_page() -> HTMLResponse:
@@ -207,7 +207,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     def admin_home(admin: dict[str, Any] = Depends(current_admin)) -> HTMLResponse:
         merchant_settings = service.get_settings()
         body = f"""
-        <p>管理员：{admin['username']} / {admin['role']}</p>
+        <p>管理员：{_escape(admin['username'])} / {_escape(admin['role'])}</p>
         <form method="post" action="/merchant-admin/settings">
           <label><input type="checkbox" name="privacy_mode_enabled" value="1" {'checked' if merchant_settings.get('privacy_mode_enabled') else ''}> 隐私模式：客户侧隐藏队伍码/控制会话细节</label><br>
           <label><input type="checkbox" name="maintenance_mode_enabled" value="1" {'checked' if merchant_settings.get('maintenance_mode_enabled') else ''}> 维护模式：禁止新下单</label><br>
@@ -361,3 +361,7 @@ def _escape(value: Any) -> str:
     import html
 
     return html.escape(str(value or ""), quote=True)
+
+
+def _pre(value: Any) -> str:
+    return "<pre>" + _escape(repr(value) if not isinstance(value, str) else value) + "</pre>"
