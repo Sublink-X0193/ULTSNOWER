@@ -375,6 +375,50 @@ def test_admin_card_generation_listing_export_and_delete(app_and_bridge):
     assert not any(c["card_code"] == cards[0]["card_code"] for c in listed_after)
 
 
+def test_admin_settings_legacy_ui_and_post_compatibility(app_and_bridge):
+    app, _bridge = app_and_bridge
+    client = TestClient(app)
+    assert client.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+
+    html = client.get("/merchant-admin").text
+    assert '登录页与注册页显示的系统名称，留空时默认使用"管理员用户名前3位+电竞"' in html
+    assert "自动分配采用排钟逻辑" in html
+    assert "下雪反作弊系统 XX-ACE（订单反白嫖）" in html
+    assert 'id="settingPrivacyMode"' in html
+    assert 'id="settingMaintenanceMode"' in html
+    assert 'id="nightTimeRangeField"' in html
+    assert "系统设置" in html
+
+    posted = client.post(
+        "/api/admin/settings",
+        json={
+            "system_name": "旧版设置兼容",
+            "privacy_mode": "0",
+            "maintenance_mode": "1",
+            "night_time_check": "0",
+            "ace_enabled": "1",
+            "default_limit_rounds": "6",
+            "absolute_rounds_per_hour": "2",
+            "global_radar_url": "http://8.148.233.14:5000/",
+        },
+    )
+    assert posted.status_code == 200, posted.text
+    settings = client.get("/api/admin/settings").json()["settings"]
+    assert settings["system_name"] == "旧版设置兼容"
+    assert settings["privacy_mode_enabled"] is False
+    assert settings["privacy_mode"] == "0"
+    assert settings["maintenance_mode_enabled"] is True
+    assert settings["maintenance_mode"] == "1"
+    assert settings["night_time_check"] is False
+    assert settings["ace_enabled"] is True
+    assert settings["default_limit_rounds"] == 6
+    assert settings["absolute_rounds_per_hour"] == 2
+
+    notice = client.post("/api/admin/notice", json={"content": "<b>公告</b>"})
+    assert notice.status_code == 200
+    assert client.get("/api/notice").json()["content"] == "<b>公告</b>"
+
+
 def test_admin_equipment_config_roundtrip(app_and_bridge):
     app, _bridge = app_and_bridge
     client = TestClient(app)

@@ -466,6 +466,20 @@ class MerchantService:
     def public_admin(self, row: dict[str, Any]) -> dict[str, Any]:
         return {"id": int(row["id"]), "username": row["username"], "role": row.get("role") or "admin", "status": row.get("status") or "active"}
 
+    @staticmethod
+    def _bool_value(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            v = value.strip().lower()
+            if v in {"1", "true", "yes", "on", "y"}:
+                return True
+            if v in {"0", "false", "no", "off", "n", ""}:
+                return False
+        return bool(value)
+
     def get_settings(self) -> dict[str, Any]:
         with self.db.connect() as con:
             rows = con.execute("SELECT key,value_json FROM merchant_settings").fetchall()
@@ -483,7 +497,7 @@ class MerchantService:
 
     def _normalize_settings(self, out: dict[str, Any]) -> dict[str, Any]:
         for key in ("privacy_mode_enabled", "maintenance_mode_enabled", "announcement_enabled", "night_time_check", "ace_enabled", "allow_custom_loadout"):
-            out[key] = bool(out.get(key))
+            out[key] = self._bool_value(out.get(key))
         for key, default in (("default_limit_rounds", 4), ("absolute_rounds_per_hour", 3), ("privacy_skip_balance", 0), ("max_loadout_cost", 65)):
             try:
                 out[key] = max(0, int(out.get(key, default)))
@@ -503,7 +517,7 @@ class MerchantService:
             if key not in values:
                 continue
             if key.endswith("_enabled") or key in {"night_time_check", "ace_enabled", "allow_custom_loadout"}:
-                sanitized[key] = bool(values.get(key))
+                sanitized[key] = self._bool_value(values.get(key))
             elif key in {"default_limit_rounds", "absolute_rounds_per_hour", "privacy_skip_balance", "max_loadout_cost"}:
                 try:
                     sanitized[key] = max(0, int(values.get(key) or 0))

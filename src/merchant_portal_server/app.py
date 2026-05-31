@@ -97,6 +97,38 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     def clear_admin_cookie(resp: Response) -> None:
         resp.delete_cookie("merchant_admin_session")
 
+    def truthy(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            v = value.strip().lower()
+            if v in {"1", "true", "yes", "on", "y"}:
+                return True
+            if v in {"0", "false", "no", "off", "n", ""}:
+                return False
+        return bool(value)
+
+    def normalize_admin_settings_payload(values: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(values or {})
+        if "privacy_mode" in payload and "privacy_mode_enabled" not in payload:
+            payload["privacy_mode_enabled"] = truthy(payload.get("privacy_mode"))
+        if "maintenance_mode" in payload and "maintenance_mode_enabled" not in payload:
+            payload["maintenance_mode_enabled"] = truthy(payload.get("maintenance_mode"))
+        for key in ("night_time_check", "ace_enabled", "allow_custom_loadout", "announcement_enabled"):
+            if key in payload:
+                payload[key] = truthy(payload.get(key))
+        return payload
+
+    def admin_settings_view(st: dict[str, Any]) -> dict[str, Any]:
+        out = dict(st)
+        out["privacy_mode"] = "1" if truthy(st.get("privacy_mode_enabled")) else "0"
+        out["maintenance_mode"] = "1" if truthy(st.get("maintenance_mode_enabled")) else "0"
+        out["global_radar_url_editable"] = True
+        out["system_name_placeholder"] = st.get("system_name") or "SNOW 自助下单"
+        return out
+
     @app.get("/health")
     def health() -> dict[str, Any]:
         return json_ok(service="merchant_portal", version="0.1.0")
@@ -272,6 +304,11 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
             "announcement_text": merchant_settings["announcement_text"] if merchant_settings["announcement_enabled"] else "",
         })
 
+    @app.get("/api/notice")
+    def api_notice() -> dict[str, Any]:
+        merchant_settings = service.get_settings()
+        return json_ok(content=merchant_settings.get("announcement_text") if merchant_settings.get("announcement_enabled") else "")
+
     @app.get("/api/capacity")
     def api_capacity(_customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
         return json_ok(capacity=service.bridge.get_capacity())
@@ -315,16 +352,22 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
 
     @app.get("/api/admin/settings")
     def api_admin_get_settings(_admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
-        return json_ok(settings=service.get_settings())
+        return json_ok(settings=admin_settings_view(service.get_settings()))
 
     @app.put("/api/admin/settings")
     def api_admin_put_settings(body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
-        return json_ok(settings=service.update_settings(admin["id"], body))
+        return json_ok(settings=admin_settings_view(service.update_settings(admin["id"], normalize_admin_settings_payload(body))))
 
     @app.post("/api/admin/settings")
     def api_admin_post_settings(body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
         payload = body.get("settings") if isinstance(body.get("settings"), dict) else body
-        return json_ok(settings=service.update_settings(admin["id"], payload))
+        return json_ok(msg="保存成功", settings=admin_settings_view(service.update_settings(admin["id"], normalize_admin_settings_payload(payload))))
+
+    @app.post("/api/admin/notice")
+    def api_admin_notice(body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        content = str(body.get("content") or "")
+        service.update_settings(admin["id"], {"announcement_text": content, "announcement_enabled": bool(content.strip())})
+        return json_ok(msg="保存成功")
 
     @app.get("/api/admin/equipment-config")
     def api_admin_equipment_config(_admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
@@ -850,87 +893,134 @@ def _admin_dashboard_html(admin: dict[str, Any]) -> str:
       <div id="ordersTable"></div>
     </div>
 
+    <!-- ===== 系统设置 ===== -->
     <div id="tab-settings" class="tab-panel">
-      <div class="section-header"><span class="section-title">系统设置</span></div>
-      <div class="settings-wrap">
-        <div class="settings-card">
-          <h3 class="setting-card-title">客户公告栏</h3>
-          <label class="switch-line" style="margin-bottom:10px"><input id="announcementEnabled" type="checkbox"> 开启公告</label>
-          <div class="notice-toolbar">
-            <select id="noticeFontSize" onchange="noticeExec('fontSize', this.value)">
-              <option value="">字号</option><option value="1">极小</option><option value="2">小</option><option value="3">正常</option><option value="4">大</option><option value="5">很大</option><option value="6">超大</option><option value="7">极大</option>
-            </select>
-            <input type="color" id="noticeFontColor" onchange="noticeExec('foreColor', this.value)" title="字体颜色" value="#000000">
-            <button class="notice-tool" onclick="noticeExec('bold')" title="加粗" style="font-weight:800">B</button>
-            <button class="notice-tool" onclick="noticeExec('italic')" title="倾斜" style="font-style:italic">I</button>
-            <button class="notice-tool" onclick="noticeExec('underline')" title="下划线" style="text-decoration:underline">U</button>
-            <button class="notice-tool" onclick="noticeExec('strikeThrough')" title="删除线" style="text-decoration:line-through">S</button>
-            <span class="notice-sep"></span>
-            <button class="notice-tool" onclick="noticeExec('justifyLeft')" title="左对齐">左</button>
-            <button class="notice-tool" onclick="noticeExec('justifyCenter')" title="居中">中</button>
-            <button class="notice-tool" onclick="noticeExec('justifyRight')" title="右对齐">右</button>
-            <span class="notice-sep"></span>
-            <button class="notice-tool" onclick="noticeExec('removeFormat')" title="清除格式">清除格式</button>
+      <!-- 公告栏编辑 -->
+      <div
+        style="background:#fff;border-radius:10px;padding:20px 24px;box-shadow:0 1px 3px rgba(0,0,0,0.04);max-width:760px;margin-bottom:16px;">
+        <h3 style="font-size:15px;font-weight:600;margin-bottom:12px;">客户公告栏</h3>
+        <div
+          style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:0;padding:8px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px 6px 0 0;">
+          <select id="noticeFontSize" onchange="noticeExec('fontSize',this.value)"
+            style="padding:3px 6px;border:1px solid #d1d5db;border-radius:4px;font-size:13px;">
+            <option value="">字号</option>
+            <option value="1">极小</option>
+            <option value="2">小</option>
+            <option value="3">正常</option>
+            <option value="4">大</option>
+            <option value="5">很大</option>
+            <option value="6">超大</option>
+            <option value="7">极大</option>
+          </select>
+          <input type="color" id="noticeFontColor" onchange="noticeExec('foreColor',this.value)" title="字体颜色"
+            style="width:32px;height:28px;border:1px solid #d1d5db;border-radius:4px;padding:2px;cursor:pointer;"
+            value="#000000" />
+          <button onclick="noticeExec('bold')" title="加粗"
+            style="padding:4px 10px;border:1px solid #d1d5db;border-radius:4px;background:#fff;font-weight:700;cursor:pointer;">B</button>
+          <button onclick="noticeExec('italic')" title="倾斜"
+            style="padding:4px 10px;border:1px solid #d1d5db;border-radius:4px;background:#fff;font-style:italic;cursor:pointer;">I</button>
+          <button onclick="noticeExec('underline')" title="下划线"
+            style="padding:4px 10px;border:1px solid #d1d5db;border-radius:4px;background:#fff;text-decoration:underline;cursor:pointer;">U</button>
+          <button onclick="noticeExec('strikeThrough')" title="删除线"
+            style="padding:4px 10px;border:1px solid #d1d5db;border-radius:4px;background:#fff;text-decoration:line-through;cursor:pointer;">S</button>
+          <span style="width:1px;background:#e5e7eb;margin:0 2px;display:inline-block;"></span>
+          <button onclick="noticeExec('justifyLeft')" title="左对齐"
+            style="padding:4px 8px;border:1px solid #d1d5db;border-radius:4px;background:#fff;cursor:pointer;">左</button>
+          <button onclick="noticeExec('justifyCenter')" title="居中"
+            style="padding:4px 8px;border:1px solid #d1d5db;border-radius:4px;background:#fff;cursor:pointer;">中</button>
+          <button onclick="noticeExec('justifyRight')" title="右对齐"
+            style="padding:4px 8px;border:1px solid #d1d5db;border-radius:4px;background:#fff;cursor:pointer;">右</button>
+          <span style="width:1px;background:#e5e7eb;margin:0 2px;display:inline-block;"></span>
+          <button onclick="noticeExec('removeFormat')" title="清除格式"
+            style="padding:4px 10px;border:1px solid #d1d5db;border-radius:4px;background:#fff;cursor:pointer;color:#6b7280;">清除格式</button>
+        </div>
+        <div id="noticeEditor" contenteditable="true"
+          style="min-height:120px;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 6px 6px;padding:12px;font-size:14px;line-height:1.7;outline:none;">
+        </div>
+        <div style="margin-top:10px;display:flex;gap:8px;align-items:center;">
+          <button class="btn-sm btn-primary" onclick="saveNotice()">保存公告</button>
+          <button class="btn-sm btn-gray"
+            onclick="document.getElementById('noticeEditor').innerHTML=''">清空</button>
+          <span id="noticeSaveResult" style="font-size:13px;color:#22c55e;"></span>
+        </div>
+      </div>
+
+      <!-- 全局参数 -->
+      <div
+        style="background:#fff;border-radius:10px;padding:20px 24px;box-shadow:0 1px 3px rgba(0,0,0,0.04);max-width:600px;">
+        <h3 style="font-size:15px;font-weight:600;margin-bottom:16px;">全局参数</h3>
+        <div class="field">
+          <label>系统名称</label>
+          <input type="text" id="settingSystemName" maxlength="32" placeholder="留空则使用默认名称" />
+          <div class="hint">登录页与注册页显示的系统名称，留空时默认使用"管理员用户名前3位+电竞"</div>
+        </div>
+        <div class="field">
+          <label>机密每小时局数</label>
+          <input type="number" id="settingLimitRounds" min="1" value="4" />
+          <div class="hint">机密模式下，每小时充值获得的局数</div>
+        </div>
+        <div class="field">
+          <label>绝密每小时局数</label>
+          <input type="number" id="settingAbsoluteRoundsPerHour" min="1" value="3" />
+          <div class="hint">绝密模式下，每小时充值获得的局数</div>
+        </div>
+        <div class="field">
+          <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;">
+            <input type="checkbox" id="settingNightTimeCheck" style="width:auto;"
+              onchange="toggleNightTimeRange()" />
+            启用包夜卡登录时间限制
+          </label>
+          <div class="hint">关闭后包夜卡可在任意时间登录，用于测试</div>
+        </div>
+        <div class="field" id="nightTimeRangeField">
+          <label>包夜卡可登录时段</label>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <input type="time" id="settingNightStartTime" style="width:auto;" />
+            <span style="color:#6b7280;">至次日</span>
+            <input type="time" id="settingNightEndTime" style="width:auto;" />
           </div>
-          <div id="noticeEditor" class="notice-editor" contenteditable="true" data-placeholder="输入向客户展示的公告，可加粗、变色、居中。"></div>
-          <div class="setting-actions">
-            <button class="btn-sm btn-primary" onclick="saveNotice()">保存公告</button>
-            <button class="btn-sm btn-gray" onclick="$('noticeEditor').innerHTML=''">清空</button>
-            <span id="noticeSaveResult" class="hint"></span>
+          <div class="hint">跨午夜时段，开始时间须晚于结束时间（如 22:50 至次日 06:10）</div>
+        </div>
+        <div class="field">
+          <label>全局备注地址</label>
+          <input type="text" id="settingGlobalRadarUrl" placeholder="http://8.148.233.14:5000/" />
+          <div class="hint">如果设置，所有客户下单后显示此备注地址（优先级高于设备备注地址）</div>
+        </div>
+        <div class="field">
+          <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
+            <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;">
+              <input type="checkbox" id="settingPrivacyMode" style="width:auto;" />
+              隐私模式
+            </label>
+            <label style="display:inline-flex;align-items:center;gap:6px;">
+              <span style="color:#6b7280;">低于</span>
+              <input type="number" id="settingPrivacySkipBalance" min="0" step="1" value="0"
+                style="width:90px;" />
+              <span style="color:#6b7280;">W 哈夫币时跳过</span>
+            </label>
           </div>
+          <div class="hint">开启后客户看不到机器列表，只显示"机密下单"和"绝密下单"按钮，系统自动分配空闲机器；当机器哈夫币余额小于设置值时视为不可用机器，0 为不跳过</div>
+          <div class="hint">自动分配采用排钟逻辑：同模式多台空闲时优先分配空闲时间最久的机器（从未跑过订单的机器最优先），优先专用机器，无可用专用机时再使用混合机器</div>
+        </div>
+        <div class="field">
+          <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;">
+            <input type="checkbox" id="settingAceEnabled" style="width:auto;" />
+            下雪反作弊系统 XX-ACE（订单反白嫖）
+          </label>
+          <div class="hint">开启后，若客户在机器"已准备待进图"状态下主动结单，系统将开启2分钟检测窗口：机器下一状态若为"空闲"则订单正常；若进入"选择干员中"则判定白嫖，自动冻结该客户账号</div>
         </div>
 
-        <div class="settings-card narrow">
-          <h3 class="setting-card-title">全局参数</h3>
-          <div class="field">
-            <label>系统名称</label>
-            <input type="text" id="settingSystemName" maxlength="32" placeholder="SNOW 自助下单">
-            <div class="hint">显示在客户中心标题和顶部名称。</div>
-          </div>
-          <div class="field-row">
-            <div class="field">
-              <label>机密每小时局数</label>
-              <input type="number" id="settingLimitRounds" min="0" value="4">
-              <div class="hint">普通 / 机密卡按小时折算局数。</div>
-            </div>
-            <div class="field">
-              <label>绝密每小时局数</label>
-              <input type="number" id="settingAbsoluteRoundsPerHour" min="0" value="3">
-              <div class="hint">绝密模式按小时折算局数。</div>
-            </div>
-          </div>
-          <div class="field">
-            <label class="switch-line"><input id="settingNightTimeCheck" type="checkbox"> 包夜卡登录时间限制</label>
-            <div id="nightTimeRange" class="field-row" style="margin-top:8px">
-              <div class="field"><label>开始时间</label><input type="time" id="settingNightStartTime" value="22:50"></div>
-              <div class="field"><label>结束时间</label><input type="time" id="settingNightEndTime" value="06:10"></div>
-            </div>
-            <div class="hint">保持拆分前规则：包夜卡只在指定时间段允许使用/登录。</div>
-          </div>
-          <div class="field">
-            <label>全局备注地址</label>
-            <input type="text" id="settingGlobalRadarUrl" maxlength="300" placeholder="例如全局雷达/备注链接">
-            <div class="hint">迁移拆分前前台展示用全局地址；为空则不显示。</div>
-          </div>
-          <div class="field">
-            <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
-              <label class="switch-line"><input id="privacyMode" type="checkbox"> 隐私模式</label>
-              <label style="display:inline-flex;align-items:center;gap:6px;color:#6b7280;">
-                <span>低于</span><input type="number" id="settingPrivacySkipBalance" min="0" value="0" style="width:90px;height:32px;"> <span>W 哈夫币时跳过</span>
-              </label>
-              <label class="switch-line"><input id="settingAceEnabled" type="checkbox"> ACE 启用</label>
-            </div>
-            <div class="hint">开启后客户侧隐藏队伍码和 control session / fencing 等敏感控制细节，后台仍完整可见。</div>
-            <div class="readonly-note">这些全局配置已迁移到商户服务器本地保存；设备执行、自动排钟仍由中央 Bridge/Agent 消费和落地。</div>
-          </div>
-          <div class="maintenance-box field">
-            <label class="switch-line"><input id="maintenanceMode" type="checkbox"> 🛠 平台维护模式（开启后客户不能新下单）</label>
-            <div class="hint">已有订单、充值、历史查询不受影响；本地订单到期仍会向中央下发 stop_current。</div>
-            <label style="display:block;font-size:12px;color:#6b7280;margin-top:8px;">维护文案（向客户展示，留空使用默认）</label>
-            <input type="text" id="maintenanceMessage" maxlength="200" placeholder="例如：系统升级中，预计 22:00 恢复">
-          </div>
-          <button class="btn-sm btn-primary" onclick="saveSettings()">保存设置</button>
+        <div class="field" style="border:1px solid #fde68a;background:#fffbeb;padding:10px 12px;border-radius:8px;">
+          <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-weight:600;color:#b45309;">
+            <input type="checkbox" id="settingMaintenanceMode" style="width:auto;" />
+            🛠 平台维护模式（开启后客户不能新下单）
+          </label>
+          <div class="hint">开启后该系统所有客户的"新下单"接口（含隐私模式）都会被拦截并显示下方维护文案。已下单运行中的订单、换机、结单、自助充值、查看历史不受影响。<b>管理员后台手动下单仍可正常使用</b>。</div>
+          <label style="display:block;font-size:12px;color:#6b7280;margin-top:8px;">维护文案（向客户展示，留空使用默认）</label>
+          <input type="text" id="settingMaintenanceMessage" maxlength="200" placeholder="例如：系统升级中，预计 22:00 恢复" />
         </div>
+
+        <button class="btn-sm btn-primary" onclick="saveSettings()">保存设置</button>
       </div>
     </div>
   </div>
@@ -1472,72 +1562,109 @@ async function orderDetail(id) {
   </tbody></table>`;
   openModal('orderDetailModal');
 }
-async function loadSettings() {
-  const d = await api('/api/admin/settings');
-  const s = d.settings;
-  _defaultLimitRounds = Number(s.default_limit_rounds ?? 4);
-  _absoluteRoundsPerHour = Number(s.absolute_rounds_per_hour ?? 3);
-  $('settingSystemName').value = s.system_name || 'SNOW 自助下单';
-  $('settingLimitRounds').value = _defaultLimitRounds;
-  $('settingAbsoluteRoundsPerHour').value = _absoluteRoundsPerHour;
-  $('settingNightTimeCheck').checked = !!s.night_time_check;
-  $('settingNightStartTime').value = s.night_start_time || '22:50';
-  $('settingNightEndTime').value = s.night_end_time || '06:10';
-  $('settingGlobalRadarUrl').value = s.global_radar_url || '';
-  $('privacyMode').checked = !!s.privacy_mode_enabled;
-  $('settingPrivacySkipBalance').value = Number(s.privacy_skip_balance || 0);
-  $('settingAceEnabled').checked = !!s.ace_enabled;
-  $('maintenanceMode').checked = !!s.maintenance_mode_enabled;
-  $('maintenanceMessage').value = s.maintenance_message || '';
-  $('announcementEnabled').checked = !!s.announcement_enabled;
-  $('noticeEditor').innerHTML = s.announcement_text || '';
-  toggleNightTimeRange();
-  updateCardEstimate();
-}
 function toggleNightTimeRange() {
-  if (!$('nightTimeRange')) return;
-  $('nightTimeRange').style.opacity = $('settingNightTimeCheck').checked ? '1' : '.45';
+  const enabled = document.getElementById('settingNightTimeCheck').checked;
+  document.getElementById('nightTimeRangeField').style.display = enabled ? '' : 'none';
+}
+async function loadSettings() {
+  try {
+    const d = await api('/api/admin/settings');
+    const s = d.settings || {};
+    const sysNameInput = document.getElementById('settingSystemName');
+    sysNameInput.value = s.system_name || '';
+    if (s.system_name_placeholder) {
+      sysNameInput.placeholder = '留空则使用默认：' + s.system_name_placeholder;
+    }
+    _defaultLimitRounds = parseInt(s.default_limit_rounds || '4') || 4;
+    _absoluteRoundsPerHour = parseInt(s.absolute_rounds_per_hour || '3') || 3;
+    document.getElementById('settingLimitRounds').value = _defaultLimitRounds;
+    document.getElementById('settingAbsoluteRoundsPerHour').value = _absoluteRoundsPerHour;
+    const nightEnabled = s.night_time_check !== '0' && s.night_time_check !== false;
+    document.getElementById('settingNightTimeCheck').checked = nightEnabled;
+    document.getElementById('settingNightStartTime').value = s.night_start_time || '22:50';
+    document.getElementById('settingNightEndTime').value = s.night_end_time || '06:10';
+    const globalRadarInput = document.getElementById('settingGlobalRadarUrl');
+    if (s.global_radar_url_editable === false) {
+      globalRadarInput.value = '暂无';
+      globalRadarInput.readOnly = true;
+      globalRadarInput.disabled = true;
+      globalRadarInput.dataset.locked = '1';
+    } else {
+      globalRadarInput.value = s.global_radar_url || 'http://8.148.233.14:5000/';
+      globalRadarInput.readOnly = false;
+      globalRadarInput.disabled = false;
+      globalRadarInput.dataset.locked = '';
+    }
+    document.getElementById('settingPrivacyMode').checked = s.privacy_mode === '1' || s.privacy_mode_enabled === true;
+    document.getElementById('settingPrivacySkipBalance').value = parseInt(s.privacy_skip_balance || '0') || 0;
+    document.getElementById('settingAceEnabled').checked = s.ace_enabled === '1' || s.ace_enabled === true;
+    const maintCheckbox = document.getElementById('settingMaintenanceMode');
+    if (maintCheckbox) maintCheckbox.checked = s.maintenance_mode === '1' || s.maintenance_mode_enabled === true;
+    const maintMsgInput = document.getElementById('settingMaintenanceMessage');
+    if (maintMsgInput) maintMsgInput.value = s.maintenance_message || '';
+    document.getElementById('noticeEditor').innerHTML = s.announcement_text || '';
+    toggleNightTimeRange();
+    updateCardEstimate();
+  } catch(e) { toast(e.message || '加载设置失败'); }
 }
 function noticeExec(cmd, val) {
-  $('noticeEditor').focus();
+  document.getElementById('noticeEditor').focus();
   document.execCommand(cmd, false, val || null);
 }
 async function saveNotice() {
+  const content = document.getElementById('noticeEditor').innerHTML;
+  const el = document.getElementById('noticeSaveResult');
   try {
-    await api('/api/admin/settings', {method:'PUT', body:JSON.stringify({
-      announcement_enabled: $('announcementEnabled').checked,
-      announcement_text: $('noticeEditor').innerHTML
-    })});
-    $('noticeSaveResult').textContent = '已保存 ✓';
-    $('noticeSaveResult').style.color = '#22c55e';
+    const data = await api('/api/admin/notice', {method:'POST', body:JSON.stringify({content})});
+    el.textContent = data.msg || '保存成功';
+    el.style.color = '#22c55e';
     toast('公告已保存');
-    setTimeout(() => $('noticeSaveResult').textContent = '', 3000);
   } catch(e) {
-    $('noticeSaveResult').textContent = e.message;
-    $('noticeSaveResult').style.color = '#ef4444';
-    toast(e.message);
+    el.textContent = e.message || '保存失败';
+    el.style.color = '#ef4444';
+    toast(e.message || '保存公告失败');
   }
+  setTimeout(() => el.textContent = '', 3000);
 }
 async function saveSettings() {
-  await api('/api/admin/settings', {method:'PUT', body:JSON.stringify({
-    system_name: $('settingSystemName').value,
-    default_limit_rounds: Number($('settingLimitRounds').value || 0),
-    absolute_rounds_per_hour: Number($('settingAbsoluteRoundsPerHour').value || 0),
-    night_time_check: $('settingNightTimeCheck').checked,
-    night_start_time: $('settingNightStartTime').value,
-    night_end_time: $('settingNightEndTime').value,
-    global_radar_url: $('settingGlobalRadarUrl').value,
-    privacy_mode_enabled: $('privacyMode').checked,
-    privacy_skip_balance: Number($('settingPrivacySkipBalance').value || 0),
-    ace_enabled: $('settingAceEnabled').checked,
-    maintenance_mode_enabled: $('maintenanceMode').checked,
-    maintenance_message: $('maintenanceMessage').value,
-    announcement_enabled: $('announcementEnabled').checked,
-    announcement_text: $('noticeEditor').innerHTML
-  })});
-  toast('保存成功');
-  await loadSettings();
-  await loadOverview();
+  const rounds = document.getElementById('settingLimitRounds').value;
+  const absoluteRoundsPerHour = document.getElementById('settingAbsoluteRoundsPerHour').value;
+  const nightTimeCheck = document.getElementById('settingNightTimeCheck').checked ? '1' : '0';
+  const nightStartTime = document.getElementById('settingNightStartTime').value || '22:50';
+  const nightEndTime = document.getElementById('settingNightEndTime').value || '06:10';
+  const globalRadarInput = document.getElementById('settingGlobalRadarUrl');
+  const globalRadarLocked = globalRadarInput.dataset.locked === '1';
+  const globalRadarUrl = globalRadarInput.value || '';
+  const privacyMode = document.getElementById('settingPrivacyMode').checked ? '1' : '0';
+  let privacySkipBalance = parseInt(document.getElementById('settingPrivacySkipBalance').value);
+  if (isNaN(privacySkipBalance) || privacySkipBalance < 0) privacySkipBalance = 0;
+  const aceEnabled = document.getElementById('settingAceEnabled').checked ? '1' : '0';
+  const systemName = (document.getElementById('settingSystemName').value || '').trim();
+  const maintCheckbox = document.getElementById('settingMaintenanceMode');
+  const maintMsgInput = document.getElementById('settingMaintenanceMessage');
+  const maintenanceMode = (maintCheckbox && maintCheckbox.checked) ? '1' : '0';
+  const maintenanceMessage = maintMsgInput ? (maintMsgInput.value || '').trim() : '';
+  try {
+    const payload = {
+      default_limit_rounds: rounds,
+      absolute_rounds_per_hour: absoluteRoundsPerHour,
+      night_time_check: nightTimeCheck,
+      night_start_time: nightStartTime,
+      night_end_time: nightEndTime,
+      privacy_mode: privacyMode,
+      privacy_skip_balance: String(privacySkipBalance),
+      ace_enabled: aceEnabled,
+      system_name: systemName,
+      maintenance_mode: maintenanceMode,
+      maintenance_message: maintenanceMessage,
+    };
+    if (!globalRadarLocked) payload.global_radar_url = globalRadarUrl;
+    const data = await api('/api/admin/settings', {method:'POST', body:JSON.stringify(payload)});
+    _defaultLimitRounds = parseInt(rounds) || _defaultLimitRounds;
+    _absoluteRoundsPerHour = parseInt(absoluteRoundsPerHour) || _absoluteRoundsPerHour;
+    toast(data.msg || '保存成功');
+    await loadOverview();
+  } catch(e) { toast(e.message || '网络错误'); }
 }
 async function loadAll() {
   await loadOverview();
