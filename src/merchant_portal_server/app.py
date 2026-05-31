@@ -114,9 +114,10 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
             capacity = {"available": False, "capacity_label": "unknown", "error": str(e)}
         banner = ""
         if merchant_settings.get("announcement_enabled") and merchant_settings.get("announcement_text"):
-            banner += f"<div style='background:#eef6ff;border:1px solid #9ec5fe;padding:10px;border-radius:8px'>公告：{_escape(merchant_settings.get('announcement_text'))}</div>"
+            banner += f"<div style='background:#eef6ff;border:1px solid #9ec5fe;padding:10px;border-radius:8px'>公告：{_safe_notice_html(merchant_settings.get('announcement_text'))}</div>"
         if merchant_settings.get("maintenance_mode_enabled"):
-            banner += "<div style='background:#fff3cd;border:1px solid #ffda6a;padding:10px;border-radius:8px;margin-top:8px'>维护模式已开启：暂时不能新下单。</div>"
+            msg = _escape(merchant_settings.get("maintenance_message") or "暂时不能新下单。")
+            banner += f"<div style='background:#fff3cd;border:1px solid #ffda6a;padding:10px;border-radius:8px;margin-top:8px'>维护模式已开启：{msg}</div>"
         return HTMLResponse(_customer_dashboard_html(customer, current, capacity, merchant_settings, banner))
 
     @app.get("/register", response_class=HTMLResponse)
@@ -204,8 +205,10 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
 
     @app.post("/merchant-admin/settings")
     def admin_settings_form(
+        system_name: str = Form("SNOW 自助下单"),
         privacy_mode_enabled: str | None = Form(None),
         maintenance_mode_enabled: str | None = Form(None),
+        maintenance_message: str = Form(""),
         announcement_enabled: str | None = Form(None),
         announcement_text: str = Form(""),
         admin: dict[str, Any] = Depends(current_admin),
@@ -213,8 +216,10 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         service.update_settings(
             admin["id"],
             {
+                "system_name": system_name,
                 "privacy_mode_enabled": privacy_mode_enabled == "1",
                 "maintenance_mode_enabled": maintenance_mode_enabled == "1",
+                "maintenance_message": maintenance_message,
                 "announcement_enabled": announcement_enabled == "1",
                 "announcement_text": announcement_text,
             },
@@ -250,8 +255,10 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     def api_public_settings() -> dict[str, Any]:
         merchant_settings = service.get_settings()
         return json_ok(settings={
+            "system_name": merchant_settings["system_name"],
             "privacy_mode_enabled": merchant_settings["privacy_mode_enabled"],
             "maintenance_mode_enabled": merchant_settings["maintenance_mode_enabled"],
+            "maintenance_message": merchant_settings["maintenance_message"] if merchant_settings["maintenance_mode_enabled"] else "",
             "announcement_enabled": merchant_settings["announcement_enabled"],
             "announcement_text": merchant_settings["announcement_text"] if merchant_settings["announcement_enabled"] else "",
         })
@@ -418,13 +425,26 @@ def _pre(value: Any) -> str:
     return "<pre>" + _escape(repr(value) if not isinstance(value, str) else value) + "</pre>"
 
 
+def _safe_notice_html(value: Any) -> str:
+    """Allow admin-authored rich-text notice HTML while stripping executable parts."""
+    import re
+
+    html = str(value or "")
+    html = re.sub(r"(?is)<\s*(script|style|iframe|object|embed|meta|link)[^>]*>.*?<\s*/\s*\1\s*>", "", html)
+    html = re.sub(r"(?is)<\s*/?\s*(script|style|iframe|object|embed|meta|link)[^>]*>", "", html)
+    html = re.sub(r"(?is)\s+on\w+\s*=\s*(['\"]).*?\1", "", html)
+    html = re.sub(r"(?is)\s+on\w+\s*=\s*[^\s>]+", "", html)
+    html = re.sub(r"(?i)javascript\s*:", "", html)
+    return html
+
+
 def _customer_dashboard_html(customer: dict[str, Any], current: dict[str, Any] | None, capacity: dict[str, Any], settings: dict[str, Any], banner: str) -> str:
     template = r"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SNOW 自助下单 - 客户中心</title>
+  <title>__SYSTEM_NAME__ - 客户中心</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif; background:linear-gradient(135deg,#f5f7fa 0%,#c3cfe2 100%); color:#1f2937; min-height:100vh; }
@@ -469,7 +489,7 @@ def _customer_dashboard_html(customer: dict[str, Any], current: dict[str, Any] |
 </head>
 <body>
   <div class="topbar">
-    <div class="topbar-logo">SNOW 自助下单 · 客户中心</div>
+    <div class="topbar-logo">__SYSTEM_NAME__ · 客户中心</div>
     <div class="topbar-right">
       <div class="balance-box">
         <span>__USERNAME__</span>
@@ -577,6 +597,7 @@ setInterval(loadCurrent, 15000);
 </html>"""
     return (
         template.replace("__USERNAME__", _escape(customer.get("username")))
+        .replace("__SYSTEM_NAME__", _escape(settings.get("system_name") or "SNOW 自助下单"))
         .replace("__BALANCE__", _escape(customer.get("balance_minutes")))
         .replace("__ROUNDS__", _escape(customer.get("balance_rounds")))
         .replace("__CAPACITY__", _escape(capacity.get("capacity_label")))
@@ -639,6 +660,22 @@ def _admin_dashboard_html(admin: dict[str, Any]) -> str:
     .settings-row:last-child { border-bottom:0; }
     textarea { width:100%; min-height:120px; border:1px solid #d1d5db; border-radius:10px; padding:12px; font:inherit; resize:vertical; }
     .switch-line { display:flex; align-items:center; gap:8px; font-weight:600; }
+    .settings-wrap { display:flex; flex-direction:column; gap:16px; align-items:flex-start; }
+    .settings-card { width:100%; max-width:760px; background:#fff; border-radius:10px; padding:20px 24px; border:1px solid #e5e7eb; box-shadow:0 1px 3px rgba(0,0,0,.04); }
+    .settings-card.narrow { max-width:640px; }
+    .setting-card-title { font-size:15px; font-weight:700; margin-bottom:12px; color:#111827; }
+    .notice-toolbar { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:0; padding:8px; background:#f9fafb; border:1px solid #e5e7eb; border-radius:6px 6px 0 0; }
+    .notice-toolbar select { height:28px; padding:3px 6px; border:1px solid #d1d5db; border-radius:4px; font-size:13px; background:#fff; }
+    .notice-toolbar input[type=color] { width:32px; height:28px; border:1px solid #d1d5db; border-radius:4px; padding:2px; cursor:pointer; background:#fff; }
+    .notice-tool { padding:4px 10px; border:1px solid #d1d5db; border-radius:4px; background:#fff; color:#374151; cursor:pointer; font-size:13px; min-width:30px; }
+    .notice-tool:hover { background:#f3f4f6; }
+    .notice-sep { width:1px; background:#e5e7eb; margin:0 2px; display:inline-block; }
+    .notice-editor { min-height:128px; border:1px solid #e5e7eb; border-top:none; border-radius:0 0 6px 6px; padding:12px; font-size:14px; line-height:1.7; outline:none; background:#fff; }
+    .notice-editor:empty:before { content: attr(data-placeholder); color:#9ca3af; }
+    .setting-actions { margin-top:10px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .maintenance-box { border:1px solid #fde68a; background:#fffbeb; padding:10px 12px; border-radius:8px; }
+    .maintenance-box label { color:#b45309; font-weight:700; }
+    .readonly-note { padding:10px 12px; border-radius:8px; background:#f8fafc; border:1px dashed #cbd5e1; color:#64748b; font-size:12px; line-height:1.7; }
     .modal-mask { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: none; align-items: center; justify-content: center; z-index: 1000; padding: 18px; }
     .modal-mask.show { display: flex; }
     .modal { width: min(560px, 96vw); max-height: 90vh; overflow: hidden; background: #fff; border-radius: 14px; box-shadow: 0 24px 80px rgba(15,23,42,.28); animation: modalIn .16s ease-out; }
@@ -712,19 +749,59 @@ def _admin_dashboard_html(admin: dict[str, Any]) -> str:
     </div>
 
     <div id="tab-settings" class="tab-panel">
-      <div class="section-header"><span class="section-title">系统设置</span><button class="btn-sm btn-primary" onclick="saveSettings()">保存设置</button></div>
-      <div class="panel">
-        <div class="settings-row">
-          <div><b>客户公告栏</b><div class="hint">显示在客户首页，也通过 /api/public/settings 暴露给前端。</div></div>
-          <div><label class="switch-line"><input id="announcementEnabled" type="checkbox"> 开启公告</label><textarea id="announcementText" placeholder="输入向客户展示的公告"></textarea></div>
+      <div class="section-header"><span class="section-title">系统设置</span></div>
+      <div class="settings-wrap">
+        <div class="settings-card">
+          <h3 class="setting-card-title">客户公告栏</h3>
+          <label class="switch-line" style="margin-bottom:10px"><input id="announcementEnabled" type="checkbox"> 开启公告</label>
+          <div class="notice-toolbar">
+            <select id="noticeFontSize" onchange="noticeExec('fontSize', this.value)">
+              <option value="">字号</option><option value="1">极小</option><option value="2">小</option><option value="3">正常</option><option value="4">大</option><option value="5">很大</option><option value="6">超大</option><option value="7">极大</option>
+            </select>
+            <input type="color" id="noticeFontColor" onchange="noticeExec('foreColor', this.value)" title="字体颜色" value="#000000">
+            <button class="notice-tool" onclick="noticeExec('bold')" title="加粗" style="font-weight:800">B</button>
+            <button class="notice-tool" onclick="noticeExec('italic')" title="倾斜" style="font-style:italic">I</button>
+            <button class="notice-tool" onclick="noticeExec('underline')" title="下划线" style="text-decoration:underline">U</button>
+            <button class="notice-tool" onclick="noticeExec('strikeThrough')" title="删除线" style="text-decoration:line-through">S</button>
+            <span class="notice-sep"></span>
+            <button class="notice-tool" onclick="noticeExec('justifyLeft')" title="左对齐">左</button>
+            <button class="notice-tool" onclick="noticeExec('justifyCenter')" title="居中">中</button>
+            <button class="notice-tool" onclick="noticeExec('justifyRight')" title="右对齐">右</button>
+            <span class="notice-sep"></span>
+            <button class="notice-tool" onclick="noticeExec('removeFormat')" title="清除格式">清除格式</button>
+          </div>
+          <div id="noticeEditor" class="notice-editor" contenteditable="true" data-placeholder="输入向客户展示的公告，可加粗、变色、居中。"></div>
+          <div class="setting-actions">
+            <button class="btn-sm btn-primary" onclick="saveNotice()">保存公告</button>
+            <button class="btn-sm btn-gray" onclick="$('noticeEditor').innerHTML=''">清空</button>
+            <span id="noticeSaveResult" class="hint"></span>
+          </div>
         </div>
-        <div class="settings-row">
-          <div><b>隐私模式</b><div class="hint">开启后客户侧隐藏队伍码与 control session 细节，保留后台完整可见。</div></div>
-          <div><label class="switch-line"><input id="privacyMode" type="checkbox"> 开启隐私模式</label></div>
-        </div>
-        <div class="settings-row">
-          <div><b>平台维护模式</b><div class="hint">开启后客户不能新下单；已有订单、充值、历史查询不受影响。</div></div>
-          <div><label class="switch-line"><input id="maintenanceMode" type="checkbox"> 开启维护模式</label></div>
+
+        <div class="settings-card narrow">
+          <h3 class="setting-card-title">全局参数</h3>
+          <div class="field">
+            <label>系统名称</label>
+            <input type="text" id="settingSystemName" maxlength="32" placeholder="SNOW 自助下单">
+            <div class="hint">显示在客户中心标题和顶部名称。</div>
+          </div>
+          <div class="field">
+            <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
+              <label class="switch-line"><input id="privacyMode" type="checkbox"> 隐私模式</label>
+              <label style="display:inline-flex;align-items:center;gap:6px;color:#6b7280;">
+                <span>低于</span><input type="number" value="0" disabled style="width:90px;height:32px;background:#f3f4f6;"> <span>W 哈夫币时跳过</span>
+              </label>
+            </div>
+            <div class="hint">开启后客户侧隐藏队伍码和 control session / fencing 等敏感控制细节，后台仍完整可见。</div>
+            <div class="readonly-note">拆分后设备余额、机器筛选、自动排钟属于中央控制服务；商户服务器只保存客户、余额、订单和本地计时。</div>
+          </div>
+          <div class="maintenance-box field">
+            <label class="switch-line"><input id="maintenanceMode" type="checkbox"> 🛠 平台维护模式（开启后客户不能新下单）</label>
+            <div class="hint">已有订单、充值、历史查询不受影响；本地订单到期仍会向中央下发 stop_current。</div>
+            <label style="display:block;font-size:12px;color:#6b7280;margin-top:8px;">维护文案（向客户展示，留空使用默认）</label>
+            <input type="text" id="maintenanceMessage" maxlength="200" placeholder="例如：系统升级中，预计 22:00 恢复">
+          </div>
+          <button class="btn-sm btn-primary" onclick="saveSettings()">保存设置</button>
         </div>
       </div>
     </div>
@@ -1048,17 +1125,41 @@ async function orderDetail(id) {
 async function loadSettings() {
   const d = await api('/api/admin/settings');
   const s = d.settings;
+  $('settingSystemName').value = s.system_name || 'SNOW 自助下单';
   $('privacyMode').checked = !!s.privacy_mode_enabled;
   $('maintenanceMode').checked = !!s.maintenance_mode_enabled;
+  $('maintenanceMessage').value = s.maintenance_message || '';
   $('announcementEnabled').checked = !!s.announcement_enabled;
-  $('announcementText').value = s.announcement_text || '';
+  $('noticeEditor').innerHTML = s.announcement_text || '';
+}
+function noticeExec(cmd, val) {
+  $('noticeEditor').focus();
+  document.execCommand(cmd, false, val || null);
+}
+async function saveNotice() {
+  try {
+    await api('/api/admin/settings', {method:'PUT', body:JSON.stringify({
+      announcement_enabled: $('announcementEnabled').checked,
+      announcement_text: $('noticeEditor').innerHTML
+    })});
+    $('noticeSaveResult').textContent = '已保存 ✓';
+    $('noticeSaveResult').style.color = '#22c55e';
+    toast('公告已保存');
+    setTimeout(() => $('noticeSaveResult').textContent = '', 3000);
+  } catch(e) {
+    $('noticeSaveResult').textContent = e.message;
+    $('noticeSaveResult').style.color = '#ef4444';
+    toast(e.message);
+  }
 }
 async function saveSettings() {
   await api('/api/admin/settings', {method:'PUT', body:JSON.stringify({
+    system_name: $('settingSystemName').value,
     privacy_mode_enabled: $('privacyMode').checked,
     maintenance_mode_enabled: $('maintenanceMode').checked,
+    maintenance_message: $('maintenanceMessage').value,
     announcement_enabled: $('announcementEnabled').checked,
-    announcement_text: $('announcementText').value
+    announcement_text: $('noticeEditor').innerHTML
   })});
   toast('保存成功');
   await loadOverview();

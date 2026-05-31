@@ -24,8 +24,10 @@ ACTIVE_ORDER_STATUSES = {
 }
 RENEWABLE_STATUSES = {"claiming_device", "device_claimed", "commanding", "waiting_ready_timer", "running"}
 DEFAULT_SETTINGS: dict[str, Any] = {
+    "system_name": "SNOW 自助下单",
     "privacy_mode_enabled": False,
     "maintenance_mode_enabled": False,
+    "maintenance_message": "",
     "announcement_enabled": False,
     "announcement_text": "",
 }
@@ -446,8 +448,10 @@ class MerchantService:
             out[str(r["key"])] = loads(r["value_json"], out.get(str(r["key"])))
         out["privacy_mode_enabled"] = bool(out.get("privacy_mode_enabled"))
         out["maintenance_mode_enabled"] = bool(out.get("maintenance_mode_enabled"))
+        out["maintenance_message"] = str(out.get("maintenance_message") or "")
         out["announcement_enabled"] = bool(out.get("announcement_enabled"))
         out["announcement_text"] = str(out.get("announcement_text") or "")
+        out["system_name"] = str(out.get("system_name") or "SNOW 自助下单")
         return out
 
     def _settings_locked(self, con: sqlite3.Connection) -> dict[str, Any]:
@@ -457,8 +461,10 @@ class MerchantService:
             out[str(r["key"])] = loads(r["value_json"], out.get(str(r["key"])))
         out["privacy_mode_enabled"] = bool(out.get("privacy_mode_enabled"))
         out["maintenance_mode_enabled"] = bool(out.get("maintenance_mode_enabled"))
+        out["maintenance_message"] = str(out.get("maintenance_message") or "")
         out["announcement_enabled"] = bool(out.get("announcement_enabled"))
         out["announcement_text"] = str(out.get("announcement_text") or "")
+        out["system_name"] = str(out.get("system_name") or "SNOW 自助下单")
         return out
 
     def update_settings(self, admin_id: int, values: dict[str, Any]) -> dict[str, Any]:
@@ -471,9 +477,19 @@ class MerchantService:
                 sanitized[key] = bool(values.get(key))
             elif key == "announcement_text":
                 text = str(values.get(key) or "").strip()
-                if len(text) > 2000:
-                    raise MerchantError("bad_announcement", "公告最多 2000 字")
+                if len(text) > 4000:
+                    raise MerchantError("bad_announcement", "公告最多 4000 字")
                 sanitized[key] = text
+            elif key == "maintenance_message":
+                text = str(values.get(key) or "").strip()
+                if len(text) > 200:
+                    raise MerchantError("bad_maintenance_message", "维护文案最多 200 字")
+                sanitized[key] = text
+            elif key == "system_name":
+                text = str(values.get(key) or "").strip()
+                if len(text) > 32:
+                    raise MerchantError("bad_system_name", "系统名称最多 32 字")
+                sanitized[key] = text or "SNOW 自助下单"
         now_s = iso()
         with self.db.connect() as con:
             con.execute("BEGIN IMMEDIATE")
@@ -602,7 +618,8 @@ class MerchantService:
                     return result
                 settings = self._settings_locked(con)
                 if settings.get("maintenance_mode_enabled"):
-                    raise MerchantError("maintenance_mode", "商户维护模式已开启，暂时不能下单", 503)
+                    msg = settings.get("maintenance_message") or "商户维护模式已开启，暂时不能下单"
+                    raise MerchantError("maintenance_mode", str(msg), 503)
                 if int(customer["balance_minutes"] or 0) < requested_minutes:
                     raise MerchantError("insufficient_balance", "分钟余额不足", 402)
                 order_no = self._new_order_no()

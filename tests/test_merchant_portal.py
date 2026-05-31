@@ -291,6 +291,7 @@ def test_admin_settings_privacy_announcement_and_maintenance(app_and_bridge):
     saved = client.put(
         "/api/admin/settings",
         json={
+            "system_name": "SNOW 商户自助",
             "privacy_mode_enabled": True,
             "maintenance_mode_enabled": False,
             "announcement_enabled": True,
@@ -299,6 +300,7 @@ def test_admin_settings_privacy_announcement_and_maintenance(app_and_bridge):
     )
     assert saved.status_code == 200, saved.text
     public_settings = client.get("/api/public/settings").json()["settings"]
+    assert public_settings["system_name"] == "SNOW 商户自助"
     assert public_settings["privacy_mode_enabled"] is True
     assert public_settings["announcement_text"] == "今晚 22:00 维护"
 
@@ -316,6 +318,7 @@ def test_admin_settings_privacy_announcement_and_maintenance(app_and_bridge):
         json={
             "privacy_mode_enabled": True,
             "maintenance_mode_enabled": True,
+            "maintenance_message": "系统升级中，预计 22:00 恢复",
             "announcement_enabled": True,
             "announcement_text": "维护中",
         },
@@ -327,6 +330,7 @@ def test_admin_settings_privacy_announcement_and_maintenance(app_and_bridge):
     blocked = client.post("/api/orders", json={"requested_minutes": 5, "team_code": "MAINT"})
     assert blocked.status_code == 503
     assert blocked.json()["error"] == "maintenance_mode"
+    assert blocked.json()["message"] == "系统升级中，预计 22:00 恢复"
 
 
 def test_html_pages_escape_user_controlled_values(app_and_bridge):
