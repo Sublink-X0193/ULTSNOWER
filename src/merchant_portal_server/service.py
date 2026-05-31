@@ -5,6 +5,7 @@ import secrets
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -141,6 +142,71 @@ class MerchantService:
             item["metadata"] = loads(item.pop("metadata_json", "{}"), {})
             out.append(item)
         return out
+
+    def _backup_dir(self) -> Path:
+        if self.db.path == Path(":memory:"):
+            raise MerchantError("backup_unavailable", "内存数据库不支持备份", 409)
+        d = self.db.path.parent / "db_backups"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    @staticmethod
+    def _backup_meta(path: Path, *, current: bool = False) -> dict[str, Any]:
+        st = path.stat()
+        return {
+            "name": path.name,
+            "size": int(st.st_size),
+            "size_kb": round(st.st_size / 1024, 1),
+            "modified_at": datetime.fromtimestamp(st.st_mtime, tz=LOCAL_TZ).isoformat(),
+            "current": current,
+        }
+
+    def _resolve_backup_path(self, name: str) -> Path:
+        safe = Path(str(name or "")).name
+        if not safe.endswith(".sqlite") and not safe.endswith(".db"):
+            raise MerchantError("bad_backup_name", "备份文件名不合法", 400)
+        path = self._backup_dir() / safe
+        if not path.exists() or not path.is_file():
+            raise MerchantError("not_found", "备份不存在", 404)
+        return path
+
+    def admin_list_backups(self) -> dict[str, Any]:
+        if self.db.path == Path(":memory:"):
+            return {"backups": [], "retention": 20}
+        current = self._backup_meta(self.db.path, current=True) if self.db.path.exists() else None
+        rows = [self._backup_meta(p) for p in sorted(self._backup_dir().glob("*.sqlite"), key=lambda x: x.stat().st_mtime, reverse=True)]
+        if current:
+            rows.insert(0, current)
+        return {"backups": rows, "retention": 20}
+
+    def _prune_backups(self, keep: int = 20) -> None:
+        files = sorted(self._backup_dir().glob("*.sqlite"), key=lambda x: x.stat().st_mtime, reverse=True)
+        for p in files[max(1, keep):]:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+    def admin_create_backup(self, admin: dict[str, Any] | None, *, label: str = "manual") -> dict[str, Any]:
+        target = self._backup_dir() / f"merchant_{label}_{utcnow().strftime('%Y%m%d_%H%M%S')}.sqlite"
+        # Write the audit entry before the backup so the backup artifact itself
+        # contains evidence of who created it. If backup later fails, the
+        # exception surfaces and the operator can retry.
+        with self.db.connect() as con:
+            self._log_admin_action_locked(con, admin, "backup_create", "backup", target.name, {"label": label})
+        with self.db.connect() as src, sqlite3.connect(str(target)) as dst:
+            src.backup(dst)
+        self._prune_backups()
+        return self._backup_meta(target)
+
+    def admin_restore_backup(self, admin: dict[str, Any] | None, name: str) -> dict[str, Any]:
+        src_path = self._resolve_backup_path(name)
+        pre = self.admin_create_backup(admin, label="pre_restore")
+        with sqlite3.connect(str(src_path)) as src, self.db.connect() as dst:
+            src.backup(dst)
+        with self.db.connect() as con:
+            self._log_admin_action_locked(con, admin, "backup_restore", "backup", src_path.name, {"pre_restore": pre["name"]})
+        return {"restored": self._backup_meta(src_path), "pre_restore": pre}
 
     def bridge_config_view(self) -> dict[str, Any]:
         settings = self.get_settings()

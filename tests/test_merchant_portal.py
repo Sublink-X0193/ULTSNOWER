@@ -840,3 +840,33 @@ def test_manual_order_same_device_concurrency_guard(tmp_path):
     assert len(err) == 5
     assert all(code in {"device_has_active_order", "manual_device_has_active_order"} for _, code in err)
     assert len(service.admin_list_orders(status="waiting_ready_timer")) == 1
+
+
+def test_admin_origin_check_and_backup_roundtrip(app_and_bridge):
+    app, _bridge = app_and_bridge
+    admin = TestClient(app)
+    assert admin.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+
+    rejected = admin.post("/api/admin/backup", headers={"Origin": "http://evil.example"}, json={})
+    assert rejected.status_code == 403
+    assert rejected.json()["error"] == "bad_origin"
+
+    ok = admin.post("/api/admin/backup", headers={"Origin": "http://testserver"}, json={})
+    assert ok.status_code == 200, ok.text
+    backup = ok.json()["backup"]
+    assert backup["name"].endswith(".sqlite")
+
+    listed = admin.get("/api/admin/backup").json()["backups"]
+    assert any(b["name"] == backup["name"] for b in listed)
+
+    downloaded = admin.get(f"/api/admin/backup/{backup['name']}")
+    assert downloaded.status_code == 200
+    assert len(downloaded.content) > 100
+
+    restored = admin.post(f"/api/admin/backup/{backup['name']}/restore", headers={"Origin": "http://testserver"}, json={})
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["pre_restore"]["name"].startswith("merchant_pre_restore_")
+
+    logs = admin.get("/api/admin/audit-logs").json()["logs"]
+    assert any(l["action"] == "backup_create" for l in logs)
+    assert any(l["action"] == "backup_restore" for l in logs)

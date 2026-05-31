@@ -110,3 +110,24 @@ python -m pytest -q
 ```
 
 结果：21 passed。
+
+## 2026-06-01 上线安全/备份追加审计
+
+### 追加检查项
+
+- [x] 管理端状态变更请求带恶意 Origin 会被 `403 bad_origin` 拒绝。
+- [x] 同源 Origin 正常允许，不影响后台正常 fetch。
+- [x] 备份列表、创建、下载、恢复接口存在。
+- [x] 备份创建/恢复要求 owner 权限。
+- [x] 恢复前自动创建 pre_restore 备份。
+- [x] 备份文件下载使用安全文件名解析，避免路径穿越。
+- [x] 备份创建与恢复均进入审计日志。
+
+### 验证
+
+```text
+python -m compileall -q src tests
+python -m pytest -q
+```
+
+结果：22 passed。

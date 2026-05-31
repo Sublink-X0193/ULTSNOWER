@@ -10,9 +10,10 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import Body, Depends, FastAPI, Form, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
 from .bridge_client import BridgeClient, BridgeClientError
 from .config import Settings, load_settings
@@ -92,6 +93,15 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         rate_buckets[key] = rows
         return False
 
+    def same_origin_request(request: Request) -> bool:
+        origin = request.headers.get("origin") or request.headers.get("referer") or ""
+        if not origin:
+            return True
+        parsed = urlparse(origin)
+        if not parsed.scheme or not parsed.netloc:
+            return False
+        return parsed.scheme == request.url.scheme and parsed.netloc == request.url.netloc
+
     @app.middleware("http")
     async def hardening_middleware(request: Request, call_next):
         path = request.url.path
@@ -99,6 +109,9 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
             if path.startswith("/api/") or request.method.upper() != "GET":
                 return json_fail("setup_required", "请先完成 Bridge API Key 首次配置", 428)
             return RedirectResponse("/setup", status_code=303)
+        if request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"} and (path.startswith("/api/admin/") or path.startswith("/merchant-admin") or path == "/api/setup/bridge"):
+            if not same_origin_request(request):
+                return json_fail("bad_origin", "请求来源不可信", 403)
         if request.method.upper() == "POST" and path in {"/api/login", "/api/night-login", "/api/register", "/api/admin/login", "/login", "/merchant-admin/login", "/api/setup/bridge"}:
             host = request.client.host if request.client else "unknown"
             if too_many_attempts(f"{host}:{path}", limit=60 if path == "/api/register" else 40, window_seconds=300):
@@ -746,6 +759,25 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     def api_admin_audit_logs(limit: int = 200, _admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
         logs = service.admin_audit_logs(limit=limit)
         return json_ok(logs=logs, total=len(logs))
+
+    @app.get("/api/admin/backup")
+    def api_admin_backup_list(_admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        return json_ok(**service.admin_list_backups())
+
+    @app.post("/api/admin/backup")
+    def api_admin_backup_create(admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
+        return json_ok(msg="备份成功", backup=service.admin_create_backup(admin))
+
+    @app.get("/api/admin/backup/{name}")
+    def api_admin_backup_download(name: str, _admin: dict[str, Any] = Depends(current_admin)) -> FileResponse:
+        path = service._resolve_backup_path(name)
+        return FileResponse(str(path), media_type="application/octet-stream", filename=path.name)
+
+    @app.post("/api/admin/backup/{name}/restore")
+    def api_admin_backup_restore(name: str, admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
+        return json_ok(msg="恢复成功；建议重启服务以确保所有连接重新打开", **service.admin_restore_backup(admin, name))
 
     @app.post("/api/admin/manual-order")
     def api_admin_manual_order(request: Request, body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
@@ -1441,6 +1473,7 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
     <div class="nav-tab" data-tab="equipment">装备配置</div>
     <div class="nav-tab" data-tab="orders">订单管理</div>
     <div class="nav-tab" data-tab="audit">审计日志</div>
+    <div class="nav-tab" data-tab="backup">备份恢复</div>
     <div class="nav-tab" data-tab="settings">系统设置</div>
   </div>
   <div class="content">
@@ -1540,6 +1573,15 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
       <div class="section-header"><span class="section-title">权限与敏感操作审计</span><button class="btn-sm btn-primary" onclick="loadAuditLogs()">刷新审计</button></div>
       <div class="hint" style="margin-bottom:10px">记录 Bridge API Key 配置、管理员手动下单、设备直控、管理员换队等敏感动作，便于上线后追责。</div>
       <div id="auditTable"></div>
+    </div>
+
+    <div id="tab-backup" class="tab-panel">
+      <div class="section-header">
+        <span class="section-title">数据库备份 / 恢复</span>
+        <div><button class="btn-sm btn-green" onclick="createBackup()">立即备份</button><button class="btn-sm btn-primary" onclick="loadBackups()">刷新</button></div>
+      </div>
+      <div class="hint" style="margin-bottom:10px">上线运维安全：恢复前会自动创建 pre_restore 备份；恢复后建议重启服务，确保所有连接重新打开。</div>
+      <div id="backupTable"></div>
     </div>
 
     <!-- ===== 系统设置 ===== -->
@@ -1941,6 +1983,7 @@ function showTab(name) {
   if (name === 'equipment') loadEquipmentConfig();
   if (name === 'orders') loadOrders();
   if (name === 'audit') loadAuditLogs();
+  if (name === 'backup') loadBackups();
   if (name === 'settings') loadSettings();
 }
 document.querySelectorAll('.nav-tab').forEach(t => t.addEventListener('click', () => showTab(t.dataset.tab)));
@@ -2486,6 +2529,28 @@ async function loadAuditLogs() {
     <td><span class="badge badge-purple">${esc(l.action)}</span></td><td>${esc(l.resource_type)} #${esc(l.resource_id || '-')}</td>
     <td><pre style="white-space:pre-wrap;margin:0;font-size:11px">${esc(JSON.stringify(l.metadata || {}, null, 2))}</pre></td>
   </tr>`).join('') + '</tbody></table>';
+}
+async function loadBackups() {
+  const d = await api('/api/admin/backup');
+  const rows = d.backups || [];
+  if (!rows.length) { $('backupTable').innerHTML = '<div class="empty-state">暂无备份</div>'; return; }
+  $('backupTable').innerHTML = `<table class="data-table"><thead><tr>
+    <th>文件</th><th>大小</th><th>修改时间</th><th>类型</th><th>操作</th>
+  </tr></thead><tbody>` + rows.map(b => `<tr>
+    <td style="font-family:Consolas,monospace">${esc(b.name)}</td><td>${esc(b.size_kb)} KB</td><td>${fmtDate(b.modified_at)}</td>
+    <td>${b.current ? '<span class="badge badge-online">当前数据库</span>' : '<span class="badge badge-purple">备份</span>'}</td>
+    <td>${b.current ? '<span class="hint">不可下载当前活动库</span>' : `<a class="btn-sm btn-primary" href="/api/admin/backup/${encodeURIComponent(b.name)}">下载</a><button class="btn-sm btn-danger" onclick="restoreBackup(decodeURIComponent('${encodeURIComponent(b.name)}'))">恢复</button>`}</td>
+  </tr>`).join('') + '</tbody></table>';
+}
+async function createBackup() {
+  try { await api('/api/admin/backup', {method:'POST', body:'{}'}); toast('备份成功'); await loadBackups(); await loadAuditLogs(); }
+  catch(e) { toast(e.message); }
+}
+async function restoreBackup(name) {
+  const ok = await appConfirm('恢复数据库', `确定恢复备份「${name}」？\n系统会先创建 pre_restore 备份，恢复后建议重启服务。`, 'btn-danger');
+  if (!ok) return;
+  try { await api('/api/admin/backup/' + encodeURIComponent(name) + '/restore', {method:'POST', body:'{}'}); toast('恢复成功，请重启服务'); await loadBackups(); await loadAuditLogs(); }
+  catch(e) { toast(e.message); }
 }
 function toggleNightTimeRange() {
   const enabled = document.getElementById('settingNightTimeCheck').checked;

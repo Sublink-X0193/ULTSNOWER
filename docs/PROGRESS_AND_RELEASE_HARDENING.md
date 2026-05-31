@@ -216,3 +216,27 @@ python -m pytest -q
 - 空闲设备也可以下发维护命令：异常重启、更新脚本、回收日志、重启备用、清理。
 - 实现方式：商户端向中央 Bridge 创建 `admin_device_maintenance` control session，再下发维护 command。
 - 不跨会话强制接管，不绕过中央 fencing/command queue。
+
+## 9. 2026-06-01 上线安全与运维备份补强
+
+### 9.1 管理端来源校验
+
+- 管理端、setup、商户后台表单的 `POST/PUT/PATCH/DELETE` 增加 Origin/Referer 同源校验。
+- 无 Origin 的非浏览器本地脚本仍可调用；带恶意 Origin 的浏览器跨站请求会被拒绝。
+- 拒绝响应：`403 bad_origin`。
+
+### 9.2 数据库备份与恢复
+
+后台新增“备份恢复”页面，接口兼容旧版运维习惯：
+
+- `GET /api/admin/backup`：列出当前数据库和历史备份。
+- `POST /api/admin/backup`：立即创建 SQLite 在线备份。
+- `GET /api/admin/backup/{name}`：下载备份文件。
+- `POST /api/admin/backup/{name}/restore`：恢复备份。
+
+安全策略：
+
+- 备份/恢复需要管理员登录；创建/恢复要求 owner 权限。
+- 恢复前自动创建 `merchant_pre_restore_*.sqlite` 备份。
+- 备份文件名使用 `Path.name` 收敛，拒绝路径穿越。
+- 备份创建审计先写入数据库，再执行 SQLite backup，使备份文件自身包含创建审计记录。
