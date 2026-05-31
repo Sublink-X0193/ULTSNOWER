@@ -108,6 +108,13 @@ class Database:
         order_cols = {r["name"] for r in con.execute("PRAGMA table_info(local_orders)").fetchall()}
         if "manual_device_id" not in order_cols:
             con.execute("ALTER TABLE local_orders ADD COLUMN manual_device_id INTEGER")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_local_orders_manual_device ON local_orders(manual_device_id, status)")
+        con.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_one_live_manual_order_per_device
+               ON local_orders(manual_device_id)
+               WHERE manual_device_id IS NOT NULL
+                 AND status IN ('created','paid','claiming_device','device_claimed','commanding','waiting_ready_timer','running','stopping','refunding')"""
+        )
         # Index/table creation is idempotent in SCHEMA_SQL; keep migrations
         # column-only so older SQLite files can be opened safely.
 
@@ -194,14 +201,9 @@ CREATE INDEX IF NOT EXISTS idx_local_orders_customer_id ON local_orders(customer
 CREATE INDEX IF NOT EXISTS idx_local_orders_status_end ON local_orders(status, end_at);
 CREATE INDEX IF NOT EXISTS idx_local_orders_created_at ON local_orders(created_at);
 CREATE INDEX IF NOT EXISTS idx_local_orders_customer_created ON local_orders(customer_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_local_orders_manual_device ON local_orders(manual_device_id, status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_one_live_order_per_customer
   ON local_orders(customer_id)
   WHERE status IN ('created','paid','claiming_device','device_claimed','commanding','waiting_ready_timer','running','stopping','refunding');
-CREATE UNIQUE INDEX IF NOT EXISTS idx_one_live_manual_order_per_device
-  ON local_orders(manual_device_id)
-  WHERE manual_device_id IS NOT NULL
-    AND status IN ('created','paid','claiming_device','device_claimed','commanding','waiting_ready_timer','running','stopping','refunding');
 
 CREATE TABLE IF NOT EXISTS order_control_bindings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

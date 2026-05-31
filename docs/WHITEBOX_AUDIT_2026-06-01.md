@@ -85,3 +85,9 @@ python -m pytest -q
 ```
 
 结果：21 passed。
+
+### 追加热修复审计
+
+- 发现旧数据库启动时，`manual_device_id` 索引如果在迁移前创建，会因旧表缺列导致启动失败。
+- 修复：将 `manual_device_id` 相关索引从初始 schema 脚本移入 `_migrate()`，保证先补列再建索引。
+- 复验：`python -m compileall -q src tests` 与 `python -m pytest -q` 均通过，21 passed。
