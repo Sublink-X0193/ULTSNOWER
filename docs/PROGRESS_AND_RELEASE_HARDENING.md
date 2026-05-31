@@ -178,3 +178,41 @@ python -m pytest -q
 - 换队
 
 这些动作仍然只对商户本地持有的 active control session 生效，不跨 session 强制接管。
+
+## 8. 2026-06-01 旧版直控/手动下单兼容补强
+
+### 8.1 手动下单弹窗向旧版靠齐
+
+后台手动下单弹窗补回旧版关键控件：
+
+- 组队码格式校验：前三位大写字母 + 后四位数字。
+- 混合模式选择：按机密 / 按绝密下单。
+- 时长小时/分钟。
+- 限制局数。
+- 限制亏币（单位 W）。
+- 绝密模式配装：默认配装 / 自定义配装。
+- 自定义配装项：头部、护甲、胸挂、手枪、背包。
+- 配装总价与最大配装价值校验。
+
+### 8.2 旧版接口别名补齐
+
+新增旧版兼容接口：
+
+- `GET /api/admin/orders/{order_id}/detail`
+- `POST /api/admin/add-time/{order_id}`
+- `POST /api/admin/devices/{device_id}/restart_backup`
+- `POST /api/admin/machines/{device_key}/restart`
+- `POST /api/admin/machines/{device_key}/update`
+- `POST /api/admin/machines/{device_key}/collect_log`
+
+### 8.3 手动订单执行参数进入 Bridge command
+
+- `max_rounds` / `max_coin_loss` 会进入 `watch` 命令参数。
+- 配装信息会进入 `set_loadout` 命令参数。
+- 本地订单新增 `order_options_json` 保存管理员手动下单选项，便于审计与复盘。
+
+### 8.4 空闲设备维护命令
+
+- 空闲设备也可以下发维护命令：异常重启、更新脚本、回收日志、重启备用、清理。
+- 实现方式：商户端向中央 Bridge 创建 `admin_device_maintenance` control session，再下发维护 command。
+- 不跨会话强制接管，不绕过中央 fencing/command queue。

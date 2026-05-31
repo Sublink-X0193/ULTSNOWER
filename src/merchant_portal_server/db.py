@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def utcnow() -> datetime:
@@ -108,6 +108,8 @@ class Database:
         order_cols = {r["name"] for r in con.execute("PRAGMA table_info(local_orders)").fetchall()}
         if "manual_device_id" not in order_cols:
             con.execute("ALTER TABLE local_orders ADD COLUMN manual_device_id INTEGER")
+        if "order_options_json" not in order_cols:
+            con.execute("ALTER TABLE local_orders ADD COLUMN order_options_json TEXT NOT NULL DEFAULT '{}'")
         con.execute("CREATE INDEX IF NOT EXISTS idx_local_orders_manual_device ON local_orders(manual_device_id, status)")
         con.execute(
             """CREATE UNIQUE INDEX IF NOT EXISTS idx_one_live_manual_order_per_device
@@ -188,6 +190,7 @@ CREATE TABLE IF NOT EXISTS local_orders (
   team_code TEXT,
   quality TEXT,
   manual_device_id INTEGER,
+  order_options_json TEXT NOT NULL DEFAULT '{}',
   amount_cents INTEGER NOT NULL DEFAULT 0,
   started_at TEXT,
   end_at TEXT,

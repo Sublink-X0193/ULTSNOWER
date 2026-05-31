@@ -221,6 +221,7 @@ class MerchantService:
 
     def _admin_order_view(self, order: dict[str, Any]) -> dict[str, Any]:
         out = dict(order)
+        out["order_options"] = loads(out.get("order_options_json"), {}) if isinstance(out.get("order_options_json"), str) else (out.get("order_options_json") or {})
         out["remaining_seconds"] = self._remaining_seconds_from_order(out)
         out["remaining_minutes"] = int(math.ceil(out["remaining_seconds"] / 60.0)) if out["remaining_seconds"] else 0
         out["binding_status"] = (out.get("binding") or {}).get("status") if isinstance(out.get("binding"), dict) else None
@@ -948,6 +949,38 @@ class MerchantService:
         out.sort(key=lambda x: int(x.get("id") or 0))
         return out
 
+    def _resolve_admin_device_id(self, identifier: Any) -> int:
+        raw = str(identifier or "").strip()
+        if raw.isdigit():
+            return int(raw)
+        for d in self.admin_list_devices():
+            keys = {
+                str(d.get("machine_id") or ""),
+                str(d.get("device_key") or ""),
+                str(d.get("id") or ""),
+                str(d.get("device_id") or ""),
+                str(d.get("device_name") or ""),
+            }
+            if raw and raw in keys:
+                return int(d.get("id") or d.get("device_id") or 0)
+        raise MerchantError("not_found", "设备不存在", 404)
+
+    @staticmethod
+    def _manual_loadout_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        loadout_type = str(payload.get("loadout_type") or "default").strip() or "default"
+        items = {
+            "helmet": str(payload.get("loadout_helmet") or "").strip(),
+            "armor": str(payload.get("loadout_armor") or "").strip(),
+            "rig": str(payload.get("loadout_rig") or "").strip(),
+            "pistol": str(payload.get("loadout_pistol") or "").strip(),
+            "backpack": str(payload.get("loadout_backpack") or "").strip(),
+        }
+        return {
+            "loadout_type": loadout_type,
+            "items": {k: v for k, v in items.items() if v},
+            "total_cost": max(0, int(payload.get("loadout_total_cost") or 0)),
+        }
+
     def admin_manual_order(
         self,
         admin: dict[str, Any] | None,
@@ -957,12 +990,16 @@ class MerchantService:
         team_code: str,
         quality: str = "standard",
         requested_rounds: int = 0,
+        max_coin_loss: int = 0,
+        loadout: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         device_id = int(device_id or 0)
         requested_minutes = int(requested_minutes or 0)
         requested_rounds = max(0, int(requested_rounds or 0))
+        max_coin_loss = max(0, int(max_coin_loss or 0))
         team_code = str(team_code or "").strip().upper()
         quality = str(quality or "standard").strip() or "standard"
+        loadout = loadout or {"loadout_type": "default", "items": {}, "total_cost": 0}
         if device_id <= 0:
             raise MerchantError("bad_device", "请选择设备")
         if requested_minutes <= 0 or requested_minutes > 24 * 60:
@@ -980,10 +1017,11 @@ class MerchantService:
                 if active:
                     raise MerchantError("manual_device_has_active_order", "该设备手动订单尚未结束", 409)
                 order_no = self._new_order_no()
+                options = {"admin_manual": True, "max_rounds": requested_rounds, "max_coin_loss": max_coin_loss, "loadout": loadout}
                 cur = con.execute(
-                    """INSERT INTO local_orders(customer_id,status,local_order_no,requested_minutes,requested_rounds,team_code,quality,manual_device_id,amount_cents,created_at,updated_at)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-                    (customer_id, "claiming_device", order_no, requested_minutes, requested_rounds, team_code, quality, device_id, 0, now_s, now_s),
+                    """INSERT INTO local_orders(customer_id,status,local_order_no,requested_minutes,requested_rounds,team_code,quality,manual_device_id,order_options_json,amount_cents,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (customer_id, "claiming_device", order_no, requested_minutes, requested_rounds, team_code, quality, device_id, dumps(options), 0, now_s, now_s),
                 )
                 order_id = int(cur.lastrowid)
                 self._log_admin_action_locked(con, admin, "manual_order_create", "device", device_id, {"order_id": order_id, "minutes": requested_minutes, "team_code": team_code, "quality": quality})
@@ -1021,6 +1059,9 @@ class MerchantService:
                 quality=quality,
                 idem=f"admin-manual-bundle:{order_no}:v1",
                 ace_enabled=bool(settings.get("ace_enabled")),
+                max_rounds=requested_rounds,
+                max_coin_loss=max_coin_loss,
+                loadout=loadout,
             )
             commands = bundle.get("commands") or []
             last_command_id = commands[-1].get("command_id") if commands else None
@@ -1076,15 +1117,41 @@ class MerchantService:
         return self.admin_get_order(order_id)
 
     def admin_device_command(self, admin: dict[str, Any] | None, device_id: int, *, action: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        device_id = int(device_id or 0)
         action = str(action or "").strip()
-        allowed = {"stop_current", "enter_team", "ready", "watch", "set_loadout", "restart_backup", "switch_spectate", "cleanup"}
+        allowed = {"stop_current", "enter_team", "ready", "watch", "set_loadout", "restart_backup", "switch_spectate", "cleanup", "restart", "update", "collect_log"}
+        maintenance_without_order = {"restart_backup", "cleanup", "restart", "update", "collect_log"}
         if action not in allowed:
             raise MerchantError("bad_command", "不允许的设备指令")
         with self.db.connect() as con:
-            row = self._active_order_by_device_locked(con, int(device_id))
-            if not row:
+            row = self._active_order_by_device_locked(con, device_id)
+            if not row and action not in maintenance_without_order:
                 raise MerchantError("no_active_control_session", "该设备没有商户本地活动控制会话；空闲设备请使用手动下单", 409)
         try:
+            if not row:
+                ref = f"admin-maint:{device_id}:{action}:{secrets.token_hex(6)}"
+                sess = self.bridge.create_control_session(
+                    merchant_context_ref=ref,
+                    idem=f"admin-maint-claim:{device_id}:{action}:{secrets.token_hex(4)}",
+                    device_id=device_id,
+                    auto_assign=False,
+                    purpose="admin_device_maintenance",
+                    expected_device_state="idle",
+                    takeover_policy="reject",
+                )
+                cmd = self.bridge.queue_command(
+                    sess["control_session_id"],
+                    fencing_token=sess["fencing_token"],
+                    action=action,
+                    params=params or {},
+                    expected_device_epoch=int(sess.get("device_epoch") or 0),
+                    idem=f"admin-maint-cmd:{device_id}:{action}:{secrets.token_hex(4)}",
+                )
+                with self.db.connect() as con:
+                    con.execute("BEGIN IMMEDIATE")
+                    self._log_admin_action_locked(con, admin, "device_maintenance_command", "device", device_id, {"action": action, "control_session_id": sess["control_session_id"]})
+                    con.commit()
+                return {"command": cmd, "control_session": sess, "order": None}
             if action == "stop_current":
                 cmd = self.bridge.queue_stop(row["control_session_id"], fencing_token=row["fencing_token"], idem=f"admin-device-stop:{row['local_order_no']}:v1", reason="merchant_admin_device_stop")
                 with self.db.connect() as con:

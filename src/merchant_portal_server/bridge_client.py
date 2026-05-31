@@ -109,12 +109,33 @@ class BridgeClient:
             "device_epoch": int(sess.get("device_epoch") or 0),
         }
 
-    def queue_command_bundle(self, session_id: str, *, fencing_token: str, expected_device_epoch: int | None, team_code: str, quality: str, idem: str, ace_enabled: bool = False) -> dict[str, Any]:
+    def queue_command_bundle(
+        self,
+        session_id: str,
+        *,
+        fencing_token: str,
+        expected_device_epoch: int | None,
+        team_code: str,
+        quality: str,
+        idem: str,
+        ace_enabled: bool = False,
+        max_rounds: int = 0,
+        max_coin_loss: int = 0,
+        loadout: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        loadout_params = {"quality": quality, "loadout_id": f"default_{quality or 'standard'}"}
+        if loadout:
+            loadout_params.update(loadout)
+        watch_params = {"ace_enabled": bool(ace_enabled), "ace_window_seconds": 120}
+        if max_rounds:
+            watch_params["max_rounds"] = int(max_rounds)
+        if max_coin_loss:
+            watch_params["max_coin_loss_w"] = int(max_coin_loss)
         commands = [
-            {"action": "set_loadout", "params": {"quality": quality, "loadout_id": f"default_{quality or 'standard'}"}},
+            {"action": "set_loadout", "params": loadout_params},
             {"action": "enter_team", "params": {"team_code": team_code, "clear_existing": True}},
             {"action": "ready", "params": {}},
-            {"action": "watch", "params": {"ace_enabled": bool(ace_enabled), "ace_window_seconds": 120}},
+            {"action": "watch", "params": watch_params},
         ]
         body = {
             "fencing_token": fencing_token,

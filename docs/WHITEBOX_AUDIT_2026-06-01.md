@@ -91,3 +91,22 @@ python -m pytest -q
 - 发现旧数据库启动时，`manual_device_id` 索引如果在迁移前创建，会因旧表缺列导致启动失败。
 - 修复：将 `manual_device_id` 相关索引从初始 schema 脚本移入 `_migrate()`，保证先补列再建索引。
 - 复验：`python -m compileall -q src tests` 与 `python -m pytest -q` 均通过，21 passed。
+
+## 2026-06-01 旧版直控兼容追加审计
+
+### 追加检查项
+
+- [x] 手动下单弹窗恢复旧版组队码、混合模式、限制局数、限制亏币、绝密配装控件。
+- [x] 手动下单 payload 中的 `max_rounds`、`max_coin_loss`、`loadout_*` 不丢失，写入 `order_options_json`。
+- [x] `max_coin_loss` 进入 Bridge `watch` 命令参数；配装进入 `set_loadout` 命令参数。
+- [x] 补齐旧版接口别名，减少旧前端/脚本调用断裂风险。
+- [x] 空闲设备维护命令通过独立 `admin_device_maintenance` control session 下发，仍保留中央 fencing/command queue 边界。
+
+### 验证
+
+```text
+python -m compileall -q src tests
+python -m pytest -q
+```
+
+结果：21 passed。

@@ -757,8 +757,10 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
             device_id=int(body.get("device_id") or 0),
             requested_minutes=int(body.get("run_minutes") or body.get("requested_minutes") or body.get("minutes") or 0),
             requested_rounds=int(body.get("run_rounds") or body.get("rounds") or body.get("max_rounds") or 0),
+            max_coin_loss=int(body.get("max_coin_loss") or 0),
             team_code=body.get("boss_name") or body.get("team_code") or "",
             quality=quality,
+            loadout=service._manual_loadout_from_payload(body),
         )
         view = _legacy_order_view(order, service.get_settings())
         return json_ok(msg="手动下单成功", order=order, order_id=order["id"], run_minutes=view["run_minutes"], run_rounds=view["run_rounds"], max_rounds=view["max_rounds"])
@@ -775,13 +777,50 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         result = service.admin_device_command(admin, device_id, action=body.get("action") or "", params=body.get("params") if isinstance(body.get("params"), dict) else {})
         return json_ok(msg="设备指令已下发", **result)
 
+    @app.post("/api/admin/devices/{device_id}/restart_backup")
+    def api_admin_device_restart_backup(device_id: int, admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
+        result = service.admin_device_command(admin, device_id, action="restart_backup", params={"operator": "merchant_admin"})
+        return json_ok(msg="已发送备用机重启指令", **result)
+
+    @app.post("/api/admin/machines/{device_key}/restart")
+    def api_admin_machine_restart(device_key: str, admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
+        result = service.admin_device_command(admin, service._resolve_admin_device_id(device_key), action="restart", params={"operator": "merchant_admin"})
+        return json_ok(msg="已发送重启指令", **result)
+
+    @app.post("/api/admin/machines/{device_key}/update")
+    def api_admin_machine_update(device_key: str, admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
+        result = service.admin_device_command(admin, service._resolve_admin_device_id(device_key), action="update", params={"operator": "merchant_admin"})
+        return json_ok(msg="已发送更新指令", **result)
+
+    @app.post("/api/admin/machines/{device_key}/collect_log")
+    def api_admin_machine_collect_log(device_key: str, admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
+        result = service.admin_device_command(admin, service._resolve_admin_device_id(device_key), action="collect_log", params={"operator": "merchant_admin"})
+        return json_ok(msg="已发送日志回收指令", **result)
+
     @app.get("/api/admin/orders/{order_id}")
     def api_admin_order_detail(order_id: int, _admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
         return json_ok(order=service.admin_get_order(order_id))
 
+    @app.get("/api/admin/orders/{order_id}/detail")
+    def api_admin_order_detail_legacy(order_id: int, _admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        order = service.admin_get_order(order_id)
+        return json_ok(detail=order, order=order, matches=[], matches_summary={"count": 0})
+
     @app.post("/api/admin/orders/{order_id}/add-time")
     def api_admin_order_add_time(order_id: int, body: dict[str, Any] = Body(...), _admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
         return json_ok(order=service.admin_adjust_order_time(order_id, add_minutes=int(body.get("add_minutes") or 0)))
+
+    @app.post("/api/admin/add-time/{order_id}")
+    def api_admin_add_time_legacy(order_id: int, body: dict[str, Any] = Body(default_factory=dict), _admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        add_minutes = int(body.get("add_minutes") or 0)
+        if not add_minutes:
+            sign = -1 if str(body.get("op") or body.get("operation") or "").lower() in {"sub", "minus", "subtract"} else 1
+            add_minutes = sign * (int(body.get("hours") or 0) * 60 + int(body.get("minutes") or body.get("add_minutes_abs") or 0))
+        return json_ok(order=service.admin_adjust_order_time(order_id, add_minutes=add_minutes), msg="订单时长已调整")
 
     @app.post("/api/admin/orders/{order_id}/stop")
     def api_admin_order_stop(order_id: int, _admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
@@ -1784,16 +1823,44 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
       <div class="modal-body">
         <input id="manualDeviceId" type="hidden">
         <div class="info-box" id="manualDeviceInfo">--</div>
-        <div class="field"><label>队伍码 / 老板名</label><input id="manualTeamCode" placeholder="例如 ABC1234"></div>
+        <div class="field"><label>组队码</label><input id="manualBossName" placeholder="前3位大写字母+后4位数字（如 ABC1234）"></div>
+        <div class="field" id="manualHybridModeSection" style="display:none">
+          <label>混合模式选择</label>
+          <div style="display:flex;gap:12px">
+            <label style="display:flex;gap:6px;align-items:center"><input type="radio" name="manualHybridMode" value="machine" checked onchange="updateManualOrderMode()"> 按机密下单</label>
+            <label style="display:flex;gap:6px;align-items:center"><input type="radio" name="manualHybridMode" value="absolute" onchange="updateManualOrderMode()"> 按绝密下单</label>
+          </div>
+        </div>
         <div class="field-row">
           <div class="field"><label>小时</label><input id="manualHours" type="number" min="0" max="24" value="1"></div>
           <div class="field"><label>分钟</label><input id="manualMinutes" type="number" min="0" max="59" value="0"></div>
         </div>
         <div class="field-row">
-          <div class="field"><label>模式</label><select id="manualMode"><option value="machine">机密</option><option value="absolute">绝密</option></select></div>
-          <div class="field"><label>局数 / 战损</label><input id="manualRounds" type="number" min="0" value="0"></div>
+          <div class="field"><label>限制局数（0表示不限制）</label><input id="manualMaxRounds" type="number" min="0" value="0"></div>
+          <div class="field"><label>限制亏币（单位：万，0表示不限制）</label><input id="manualMaxCoinLoss" type="number" min="0" value="0"></div>
         </div>
-        <div class="hint">手动下单不扣客户余额，会创建本地管理员订单，收到 ready_for_customer_timer 后一样开始计时。</div>
+        <div id="manualLoadoutSection" style="display:none">
+          <div class="field">
+            <label>配装类型</label>
+            <div style="display:flex;gap:12px">
+              <label style="display:flex;gap:6px;align-items:center"><input type="radio" name="manualLoadoutType" value="default" checked onchange="toggleManualLoadoutCustom()"> 大红包默认配装</label>
+              <label id="manualCustomLoadoutOption" style="display:flex;gap:6px;align-items:center"><input type="radio" name="manualLoadoutType" value="custom" onchange="toggleManualLoadoutCustom()"> 自定义配装</label>
+            </div>
+          </div>
+          <div id="manualCustomLoadoutFields" style="display:none">
+            <div class="field-row">
+              <div class="field"><label>头部装备</label><select id="manualLoadoutHelmet" onchange="calculateManualLoadoutCost()"><option value="">不携带</option></select></div>
+              <div class="field"><label>护甲装备</label><select id="manualLoadoutArmor" onchange="calculateManualLoadoutCost()"><option value="">不携带</option></select></div>
+            </div>
+            <div class="field-row">
+              <div class="field"><label>胸挂装备</label><select id="manualLoadoutRig" onchange="calculateManualLoadoutCost()"><option value="">不携带</option></select></div>
+              <div class="field"><label>手枪装备</label><select id="manualLoadoutPistol" onchange="calculateManualLoadoutCost()"><option value="">不携带</option></select></div>
+            </div>
+            <div class="field"><label>背包装备</label><select id="manualLoadoutBackpack" onchange="calculateManualLoadoutCost()"><option value="">不携带</option></select></div>
+            <div class="info-box" id="manualLoadoutCostBox">配装总价：<span id="manualLoadoutCostValue">0W</span> / <span id="manualMaxCost">65</span>W</div>
+          </div>
+        </div>
+        <div class="hint">上机用户将显示为「组队码-手动」。手动下单不扣客户余额，收到 ready_for_customer_timer 后一样开始计时。</div>
       </div>
       <div class="modal-foot"><button class="btn-sm btn-gray" onclick="closeModal('manualOrderModal')">取消</button><button class="btn-sm btn-green" onclick="submitManualOrder()">确认下单</button></div>
     </div>
@@ -2054,7 +2121,10 @@ function renderDevicesAdmin(rows) {
       <td>${esc(d.agent_state || '-')}<br><span class="hint">${esc(d.ui_state || '')}</span></td>
       <td>${o ? `${statusBadge(o.status)}<br>${esc(o.customer_username || d.active_customer || '-') } / 剩 ${fmtMin(o.remaining_minutes)}` : '-'}</td>
       <td>
-        ${!o ? `<button class="btn-sm btn-green" onclick="openManualOrder(${d.id}, decodeURIComponent('${encodeURIComponent(d.device_name || (d.id + '号机'))}'))">手动下单</button>` : ''}
+        ${!o ? `<button class="btn-sm btn-green" onclick="openManualOrder(${d.id}, decodeURIComponent('${encodeURIComponent(d.device_name || (d.id + '号机'))}'), '${esc(d.mode || d.device_mode || 'machine')}')">手动下单</button>
+               <button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'restart')">异常重启</button>
+               <button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'update')">更新脚本</button>
+               <button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'collect_log')">回收日志</button>` : ''}
         ${o ? `<button class="btn-sm btn-primary" onclick="openAdminRejoin(${o.id}, decodeURIComponent('${encodeURIComponent(o.team_code || '')}'))">换队</button>
                <button class="btn-sm btn-danger" onclick="sendDeviceCommand(${d.id}, 'stop_current')">停止</button>
                <button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'ready')">准备</button>
@@ -2066,26 +2136,99 @@ function renderDevicesAdmin(rows) {
     </tr>`;
   }).join('') + '</tbody></table>';
 }
-function openManualOrder(deviceId, name) {
+let _manualOrderMode = 'machine';
+let _manualMaxLoadoutCost = 65;
+let _manualAllowCustomLoadout = true;
+function getManualEffectiveMode() {
+  return _manualOrderMode === 'hybrid' ? (document.querySelector('input[name="manualHybridMode"]:checked')?.value || 'machine') : _manualOrderMode;
+}
+function validateBossName(name) { return /^[A-Z]{3}\\d{4}$/.test(String(name || '').trim()); }
+function updateManualOrderMode() {
+  const effective = getManualEffectiveMode();
+  $('manualLoadoutSection').style.display = effective === 'absolute' ? '' : 'none';
+  if (effective === 'absolute') {
+    loadManualEquipmentConfig().then(() => calculateManualLoadoutCost());
+    const roundsEl = $('manualMaxRounds');
+    if (!Number(roundsEl.value || 0)) {
+      const minutes = Number($('manualHours').value || 0) * 60 + Number($('manualMinutes').value || 0);
+      roundsEl.value = minutes ? Math.max(_absoluteRoundsPerHour, Math.floor(minutes / 60 * _absoluteRoundsPerHour)) : 0;
+    }
+  }
+}
+async function loadManualEquipmentConfig() {
+  try {
+    const d = await api('/api/admin/equipment-config');
+    _manualMaxLoadoutCost = Number(d.max_loadout_cost || 65);
+    _manualAllowCustomLoadout = d.allow_custom_loadout !== false;
+    $('manualMaxCost').textContent = _manualMaxLoadoutCost;
+    $('manualCustomLoadoutOption').style.display = _manualAllowCustomLoadout ? 'flex' : 'none';
+    const map = {helmet:'manualLoadoutHelmet', armor:'manualLoadoutArmor', rig:'manualLoadoutRig', pistol:'manualLoadoutPistol', backpack:'manualLoadoutBackpack'};
+    Object.values(map).forEach(id => { $(id).innerHTML = '<option value="">不携带</option>'; });
+    (d.equipment || []).filter(e => Number(e.enabled) === 1).forEach(e => {
+      const sel = $(map[e.equipment_type]); if (!sel) return;
+      const opt = document.createElement('option');
+      opt.value = `${e.equipment_name}:${Number(e.price || 0)}`;
+      opt.textContent = `${e.equipment_name} (${Number(e.price || 0)}W)`;
+      sel.appendChild(opt);
+    });
+  } catch(_e) {}
+}
+function toggleManualLoadoutCustom() {
+  const isCustom = _manualAllowCustomLoadout && document.querySelector('input[name="manualLoadoutType"]:checked')?.value === 'custom';
+  $('manualCustomLoadoutFields').style.display = isCustom ? '' : 'none';
+  calculateManualLoadoutCost();
+}
+function calculateManualLoadoutCost() {
+  const ids = ['manualLoadoutHelmet','manualLoadoutArmor','manualLoadoutRig','manualLoadoutPistol','manualLoadoutBackpack'];
+  let total = 0;
+  ids.forEach(id => { const v = $(id)?.value || ''; if (v.includes(':')) total += Number(v.split(':')[1] || 0); });
+  $('manualLoadoutCostValue').textContent = total.toFixed(1) + 'W';
+  $('manualLoadoutCostBox').style.background = total > _manualMaxLoadoutCost ? '#fee2e2' : '#eff6ff';
+  $('manualLoadoutCostBox').style.color = total > _manualMaxLoadoutCost ? '#991b1b' : '#1d4ed8';
+  return total;
+}
+function openManualOrder(deviceId, name, mode='machine') {
+  _manualOrderMode = mode || 'machine';
   $('manualDeviceId').value = deviceId;
-  $('manualDeviceInfo').textContent = `设备：${name || deviceId}`;
-  $('manualTeamCode').value = '';
+  const label = _manualOrderMode === 'absolute' ? '绝密' : (_manualOrderMode === 'hybrid' ? '混合' : '机密');
+  $('manualDeviceInfo').innerHTML = `设备：<b>${esc(name || deviceId)}</b> · 模式：<b>${label}</b>`;
+  $('manualBossName').value = '';
   $('manualHours').value = '1';
   $('manualMinutes').value = '0';
-  $('manualMode').value = 'machine';
-  $('manualRounds').value = '0';
+  $('manualMaxRounds').value = '0';
+  $('manualMaxCoinLoss').value = '0';
+  $('manualHybridModeSection').style.display = _manualOrderMode === 'hybrid' ? '' : 'none';
+  document.querySelector('input[name="manualHybridMode"][value="machine"]').checked = true;
+  document.querySelector('input[name="manualLoadoutType"][value="default"]').checked = true;
+  $('manualCustomLoadoutFields').style.display = 'none';
+  updateManualOrderMode();
   openModal('manualOrderModal');
 }
 async function submitManualOrder() {
   const minutes = Number($('manualHours').value || 0) * 60 + Number($('manualMinutes').value || 0);
-  const mode = $('manualMode').value;
+  const bossName = $('manualBossName').value.trim().toUpperCase();
+  const mode = getManualEffectiveMode();
+  if (!validateBossName(bossName)) { toast('组队码格式错误：前3位大写字母+后4位数字'); return; }
+  if (minutes <= 0) { toast('请填写有效运行时长'); return; }
+  const loadoutType = document.querySelector('input[name="manualLoadoutType"]:checked')?.value || 'default';
+  const loadoutTotalCost = calculateManualLoadoutCost();
+  if (mode === 'absolute' && loadoutType === 'custom' && loadoutTotalCost > _manualMaxLoadoutCost) { toast(`配装总价不能超过 ${_manualMaxLoadoutCost}W`); return; }
+  const getLoadoutName = id => { const v=$(id)?.value || ''; return v.includes(':') ? v.split(':')[0] : ''; };
   try {
     await api('/api/admin/manual-order', {method:'POST', body:JSON.stringify({
       device_id: Number($('manualDeviceId').value || 0),
-      boss_name: $('manualTeamCode').value.trim(),
+      boss_name: bossName,
       run_minutes: minutes,
-      run_rounds: Number($('manualRounds').value || 0),
+      max_rounds: Number($('manualMaxRounds').value || 0),
+      max_coin_loss: Number($('manualMaxCoinLoss').value || 0),
       selected_mode: mode,
+      loadout_type: mode === 'absolute' ? loadoutType : 'default',
+      loadout_helmet: getLoadoutName('manualLoadoutHelmet'),
+      loadout_armor: getLoadoutName('manualLoadoutArmor'),
+      loadout_rig: getLoadoutName('manualLoadoutRig'),
+      loadout_pistol: getLoadoutName('manualLoadoutPistol'),
+      loadout_backpack: getLoadoutName('manualLoadoutBackpack'),
+      loadout_total_cost: Math.round(loadoutTotalCost * 10000),
     })});
     closeModal('manualOrderModal'); toast('手动下单已创建'); await loadDevicesAdmin(); await loadOrders(); await loadOverview();
   } catch(e) { toast(e.message); }

@@ -87,14 +87,19 @@ class FakeBridge:
             self._event("control_session.created", sid, device_id=did, device_epoch=1, payload={"purpose": "customer_control"})
             return dict(sess)
 
-    def queue_command_bundle(self, session_id: str, *, fencing_token: str, expected_device_epoch: int | None, team_code: str, quality: str, idem: str, ace_enabled: bool = False) -> dict[str, Any]:
+    def queue_command_bundle(self, session_id: str, *, fencing_token: str, expected_device_epoch: int | None, team_code: str, quality: str, idem: str, ace_enabled: bool = False, max_rounds: int = 0, max_coin_loss: int = 0, loadout: dict[str, Any] | None = None) -> dict[str, Any]:
         with self.lock:
             if session_id not in self.sessions:
                 raise BridgeClientError("not_found", "session missing", 404)
             bundle_id = f"bundle_{session_id}"
             out = []
             for action in ["set_loadout", "enter_team", "ready", "watch"]:
-                params = {"ace_enabled": bool(ace_enabled), "ace_window_seconds": 120} if action == "watch" else {}
+                if action == "watch":
+                    params = {"ace_enabled": bool(ace_enabled), "ace_window_seconds": 120, "max_rounds": int(max_rounds or 0), "max_coin_loss_w": int(max_coin_loss or 0)}
+                elif action == "set_loadout":
+                    params = dict(loadout or {})
+                else:
+                    params = {}
                 cmd = {"command_id": f"cmd_{len(self.commands)+1}", "control_session_id": session_id, "action": action, "params": params, "status": "queued", "bundle_id": bundle_id}
                 self.commands.append(cmd)
                 out.append(dict(cmd))
@@ -105,6 +110,13 @@ class FakeBridge:
             cmd = {"command_id": f"cmd_{len(self.commands)+1}", "control_session_id": session_id, "action": "stop_current", "status": "queued"}
             self.commands.append(cmd)
             self._event("command.queued", session_id, command_id=cmd["command_id"], device_id=self.sessions[session_id]["device_id"], payload={"action": "stop_current"})
+            return dict(cmd)
+
+    def queue_command(self, session_id: str, *, fencing_token: str, action: str, params: dict[str, Any] | None = None, expected_device_epoch: int | None = None, idem: str) -> dict[str, Any]:
+        with self.lock:
+            cmd = {"command_id": f"cmd_{len(self.commands)+1}", "control_session_id": session_id, "action": action, "params": dict(params or {}), "status": "queued"}
+            self.commands.append(cmd)
+            self._event("command.queued", session_id, command_id=cmd["command_id"], device_id=self.sessions[session_id]["device_id"], payload={"action": action})
             return dict(cmd)
 
     def renew_session(self, session_id: str, *, fencing_token: str, idem: str, ttl_seconds: int = 180) -> dict[str, Any]:
@@ -750,12 +762,38 @@ def test_admin_order_analytics_devices_and_manual_order(app_and_bridge):
     devices = admin.get("/api/admin/devices").json()["devices"]
     assert any(d["id"] == 1 for d in devices)
 
-    manual = admin.post("/api/admin/manual-order", json={"device_id": 1, "boss_name": "ADM123", "run_minutes": 30, "selected_mode": "machine"})
+    manual = admin.post(
+        "/api/admin/manual-order",
+        json={
+            "device_id": 1,
+            "boss_name": "ADM123",
+            "run_minutes": 30,
+            "selected_mode": "absolute",
+            "max_rounds": 3,
+            "max_coin_loss": 12,
+            "loadout_type": "custom",
+            "loadout_helmet": "五级夜视头",
+            "loadout_total_cost": 120000,
+        },
+    )
     assert manual.status_code == 200, manual.text
     order = manual.json()["order"]
     assert order["status"] == "waiting_ready_timer"
+    assert order["quality"] == "secret"
+    assert order["order_options"]["max_coin_loss"] == 12
     assert bridge.session_requests[-1]["device_id"] == 1
     assert bridge.session_requests[-1]["purpose"] == "admin_manual_order"
+    assert bridge.commands[-4]["action"] == "set_loadout"
+    assert bridge.commands[-4]["params"]["loadout_type"] == "custom"
+    assert bridge.commands[-1]["params"]["max_coin_loss_w"] == 12
+
+    detail = admin.get(f"/api/admin/orders/{order['id']}/detail")
+    assert detail.status_code == 200
+    assert detail.json()["detail"]["id"] == order["id"]
+
+    added = admin.post(f"/api/admin/add-time/{order['id']}", json={"minutes": 5})
+    assert added.status_code == 200
+    assert added.json()["order"]["requested_minutes"] == 35
 
     rejoin = admin.post(f"/api/admin/manual-rejoin/{order['id']}", json={"boss_name": "ADM456"})
     assert rejoin.status_code == 200, rejoin.text
@@ -764,9 +802,14 @@ def test_admin_order_analytics_devices_and_manual_order(app_and_bridge):
     stop = admin.post("/api/admin/devices/1/command", json={"action": "stop_current"})
     assert stop.status_code == 200, stop.text
     assert bridge.commands[-1]["action"] == "stop_current"
+    maint = admin.post("/api/admin/machines/2/restart")
+    assert maint.status_code == 200, maint.text
+    assert bridge.session_requests[-1]["purpose"] == "admin_device_maintenance"
+    assert bridge.commands[-1]["action"] == "restart"
     logs = admin.get("/api/admin/audit-logs").json()["logs"]
     assert any(l["action"] == "manual_order_create" for l in logs)
     assert any(l["action"] == "device_command" for l in logs)
+    assert any(l["action"] == "device_maintenance_command" for l in logs)
 
     analytics = admin.get("/api/admin/order-analytics?period=day").json()["analytics"]
     assert analytics["order_count"] >= 1
