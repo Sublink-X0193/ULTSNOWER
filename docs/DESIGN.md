@@ -10,6 +10,7 @@
 ## 商户服务器职责
 
 - 客户注册、登录、session cookie。
+- 商户管理员登录、后台配置页。
 - 客户余额：分钟/局数。
 - 本地充值卡和充值记录。
 - 本地订单、购买时长、退款/补偿。
@@ -49,6 +50,9 @@ running -> interrupted_by_admin / interrupted_by_disconnect
 
 - `customers`
 - `sessions`
+- `merchant_admins`
+- `admin_sessions`
+- `merchant_settings`
 - `local_orders`
 - `order_control_bindings`
 - `bridge_events`
@@ -68,3 +72,25 @@ SQLite 使用 WAL，写路径使用 `BEGIN IMMEDIATE`，并通过 partial unique
 - 下发启动 bundle：`bundle:start:{local_order_no}:v1`。
 - 停止命令：`stop:{local_order_no}:v1`。
 - 中央抢设备失败后本地订单失败并返还已扣分钟。
+
+## 商户后台配置
+
+后台入口：
+
+```text
+/merchant-admin/login
+/merchant-admin
+```
+
+首次启动会用环境变量创建默认管理员：
+
+```text
+MERCHANT_ADMIN_USERNAME=admin
+MERCHANT_ADMIN_PASSWORD=admin123456
+```
+
+支持配置：
+
+- `privacy_mode_enabled`：隐私模式。客户侧订单响应会隐藏队伍码、移除 `fencing_token` 和 `merchant_context_ref`，并可遮罩 control session id。
+- `maintenance_mode_enabled`：维护模式。已存在订单可继续展示/处理，新下单会返回 `maintenance_mode`。
+- `announcement_enabled` / `announcement_text`：公告开关和内容。客户首页展示，`GET /api/public/settings` 返回给前端。

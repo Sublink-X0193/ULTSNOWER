@@ -23,6 +23,12 @@ ACTIVE_ORDER_STATUSES = {
     "refunding",
 }
 RENEWABLE_STATUSES = {"claiming_device", "device_claimed", "commanding", "waiting_ready_timer", "running"}
+DEFAULT_SETTINGS: dict[str, Any] = {
+    "privacy_mode_enabled": False,
+    "maintenance_mode_enabled": False,
+    "announcement_enabled": False,
+    "announcement_text": "",
+}
 
 
 class MerchantError(RuntimeError):
@@ -148,6 +154,153 @@ class MerchantService:
                 raise MerchantError("not_found", "客户不存在", 404)
             return self.public_customer(dict(row))
 
+    # ---------- merchant admin / settings ----------
+    def ensure_default_admin(self, username: str, password: str) -> None:
+        username = str(username or "").strip()
+        if not username or not password:
+            return
+        now_s = iso()
+        with self.db.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            try:
+                count = int(con.execute("SELECT COUNT(*) AS n FROM merchant_admins").fetchone()["n"])
+                if count == 0:
+                    con.execute(
+                        "INSERT INTO merchant_admins(username,password_hash,role,status,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                        (username, hash_password(password), "owner", "active", now_s, now_s),
+                    )
+                con.commit()
+            except Exception:
+                con.rollback()
+                raise
+
+    def authenticate_admin(self, username: str, password: str) -> dict[str, Any]:
+        with self.db.connect() as con:
+            row = con.execute("SELECT * FROM merchant_admins WHERE username=? AND status='active'", (str(username or "").strip(),)).fetchone()
+            if not row or not verify_password(str(password or ""), row["password_hash"]):
+                raise MerchantError("bad_credentials", "管理员用户名或密码错误", 401)
+            con.execute("UPDATE merchant_admins SET last_login_at=?,updated_at=? WHERE id=?", (iso(), iso(), int(row["id"])))
+            return self.public_admin(dict(row))
+
+    def create_admin_session(self, admin_id: int) -> str:
+        sid = secrets.token_urlsafe(32)
+        now_s = iso()
+        expires = iso(utcnow() + timedelta(seconds=self.session_ttl_seconds))
+        with self.db.connect() as con:
+            row = con.execute("SELECT * FROM merchant_admins WHERE id=? AND status='active'", (admin_id,)).fetchone()
+            if not row:
+                raise MerchantError("not_found", "管理员不存在", 404)
+            con.execute(
+                "INSERT INTO admin_sessions(sid,admin_id,username,role,expires_at,created_at) VALUES(?,?,?,?,?,?)",
+                (sid, admin_id, row["username"], row["role"], expires, now_s),
+            )
+        return sid
+
+    def delete_admin_session(self, sid: str) -> None:
+        if not sid:
+            return
+        with self.db.connect() as con:
+            con.execute("DELETE FROM admin_sessions WHERE sid=?", (sid,))
+
+    def admin_from_session(self, sid: str | None) -> dict[str, Any] | None:
+        if not sid:
+            return None
+        with self.db.connect() as con:
+            row = con.execute(
+                """SELECT a.* FROM admin_sessions s JOIN merchant_admins a ON a.id=s.admin_id
+                   WHERE s.sid=? AND s.expires_at>? AND a.status='active'""",
+                (sid, iso()),
+            ).fetchone()
+            return self.public_admin(dict(row)) if row else None
+
+    def public_admin(self, row: dict[str, Any]) -> dict[str, Any]:
+        return {"id": int(row["id"]), "username": row["username"], "role": row.get("role") or "admin", "status": row.get("status") or "active"}
+
+    def get_settings(self) -> dict[str, Any]:
+        with self.db.connect() as con:
+            rows = con.execute("SELECT key,value_json FROM merchant_settings").fetchall()
+        out = dict(DEFAULT_SETTINGS)
+        for r in rows:
+            out[str(r["key"])] = loads(r["value_json"], out.get(str(r["key"])))
+        out["privacy_mode_enabled"] = bool(out.get("privacy_mode_enabled"))
+        out["maintenance_mode_enabled"] = bool(out.get("maintenance_mode_enabled"))
+        out["announcement_enabled"] = bool(out.get("announcement_enabled"))
+        out["announcement_text"] = str(out.get("announcement_text") or "")
+        return out
+
+    def _settings_locked(self, con: sqlite3.Connection) -> dict[str, Any]:
+        rows = con.execute("SELECT key,value_json FROM merchant_settings").fetchall()
+        out = dict(DEFAULT_SETTINGS)
+        for r in rows:
+            out[str(r["key"])] = loads(r["value_json"], out.get(str(r["key"])))
+        out["privacy_mode_enabled"] = bool(out.get("privacy_mode_enabled"))
+        out["maintenance_mode_enabled"] = bool(out.get("maintenance_mode_enabled"))
+        out["announcement_enabled"] = bool(out.get("announcement_enabled"))
+        out["announcement_text"] = str(out.get("announcement_text") or "")
+        return out
+
+    def update_settings(self, admin_id: int, values: dict[str, Any]) -> dict[str, Any]:
+        allowed = set(DEFAULT_SETTINGS)
+        sanitized: dict[str, Any] = {}
+        for key in allowed:
+            if key not in values:
+                continue
+            if key.endswith("_enabled"):
+                sanitized[key] = bool(values.get(key))
+            elif key == "announcement_text":
+                text = str(values.get(key) or "").strip()
+                if len(text) > 2000:
+                    raise MerchantError("bad_announcement", "公告最多 2000 字")
+                sanitized[key] = text
+        now_s = iso()
+        with self.db.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            try:
+                for key, value in sanitized.items():
+                    con.execute(
+                        """INSERT INTO merchant_settings(key,value_json,updated_at,updated_by_admin_id)
+                           VALUES(?,?,?,?)
+                           ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at,updated_by_admin_id=excluded.updated_by_admin_id""",
+                        (key, dumps(value), now_s, admin_id),
+                    )
+                con.commit()
+            except Exception:
+                con.rollback()
+                raise
+        return self.get_settings()
+
+    def public_order(self, order: dict[str, Any] | None, *, privacy_mode: bool | None = None) -> dict[str, Any] | None:
+        if order is None:
+            return None
+        if privacy_mode is None:
+            privacy_mode = bool(self.get_settings().get("privacy_mode_enabled"))
+        out = dict(order)
+        if privacy_mode and out.get("team_code"):
+            out["team_code"] = self._mask(out.get("team_code"))
+            out["team_code_masked"] = True
+        binding = out.get("binding")
+        if isinstance(binding, dict):
+            safe_binding = {
+                "control_session_id": binding.get("control_session_id"),
+                "device_id": binding.get("device_id"),
+                "ready_timer_received": binding.get("ready_timer_received"),
+                "status": binding.get("status"),
+            }
+            if privacy_mode and safe_binding.get("control_session_id"):
+                safe_binding["control_session_id"] = self._mask(safe_binding["control_session_id"])
+            out["binding"] = safe_binding
+        return out
+
+    def public_orders(self, orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        privacy = bool(self.get_settings().get("privacy_mode_enabled"))
+        return [self.public_order(o, privacy_mode=privacy) for o in orders if o is not None]
+
+    def _mask(self, value: Any) -> str:
+        s = str(value or "")
+        if len(s) <= 4:
+            return "*" * len(s)
+        return s[:2] + "***" + s[-2:]
+
     # ---------- recharge ----------
     def add_recharge_card(self, code: str, *, minutes: int = 0, rounds: int = 0) -> None:
         if minutes <= 0 and rounds <= 0:
@@ -225,6 +378,9 @@ class MerchantService:
                         )
                     con.commit()
                     return result
+                settings = self._settings_locked(con)
+                if settings.get("maintenance_mode_enabled"):
+                    raise MerchantError("maintenance_mode", "商户维护模式已开启，暂时不能下单", 503)
                 if int(customer["balance_minutes"] or 0) < requested_minutes:
                     raise MerchantError("insufficient_balance", "分钟余额不足", 402)
                 order_no = self._new_order_no()

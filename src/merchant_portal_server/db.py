@@ -85,6 +85,36 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_customer ON sessions(customer_id);
 
+CREATE TABLE IF NOT EXISTS merchant_admins (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'owner',
+  status TEXT NOT NULL DEFAULT 'active',
+  last_login_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS admin_sessions (
+  sid TEXT PRIMARY KEY,
+  admin_id INTEGER NOT NULL,
+  username TEXT NOT NULL,
+  role TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(admin_id) REFERENCES merchant_admins(id)
+);
+CREATE INDEX IF NOT EXISTS idx_admin_sessions_admin ON admin_sessions(admin_id);
+
+CREATE TABLE IF NOT EXISTS merchant_settings (
+  key TEXT PRIMARY KEY,
+  value_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  updated_by_admin_id INTEGER,
+  FOREIGN KEY(updated_by_admin_id) REFERENCES merchant_admins(id)
+);
+
 CREATE TABLE IF NOT EXISTS local_orders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   customer_id INTEGER NOT NULL,

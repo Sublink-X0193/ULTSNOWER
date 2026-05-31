@@ -16,6 +16,8 @@ class Settings:
     enable_background_workers: bool = os.getenv("MERCHANT_ENABLE_BACKGROUND_WORKERS", "0") in {"1", "true", "TRUE", "yes"}
     bind_host: str = os.getenv("MERCHANT_HOST", "127.0.0.1")
     bind_port: int = int(os.getenv("MERCHANT_PORT", "8020"))
+    default_admin_username: str = os.getenv("MERCHANT_ADMIN_USERNAME", "admin")
+    default_admin_password: str = os.getenv("MERCHANT_ADMIN_PASSWORD", "admin123456")
 
 
 def load_settings() -> Settings:

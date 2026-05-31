@@ -18,6 +18,8 @@ $env:MERCHANT_DB_PATH = "data\merchant.sqlite"
 $env:BRIDGE_BASE_URL = "http://127.0.0.1:8010"
 $env:BRIDGE_MERCHANT_KEY = "mk_test"
 $env:BRIDGE_MERCHANT_SECRET = "secret"
+$env:MERCHANT_ADMIN_USERNAME = "admin"
+$env:MERCHANT_ADMIN_PASSWORD = "admin123456"
 python -m merchant_portal_server
 ```
 
@@ -42,7 +44,25 @@ python -m pytest -q
 - `POST /internal/workers/order-expire` 本地到期订单主动 stop。
 - `POST /internal/workers/session-renew` 续约 control session。
 - `POST /internal/workers/recover` 重启恢复：查 session state + events cursor 补偿。
+- `/merchant-admin/login` 商户管理员登录。
+- `/merchant-admin` 商户后台配置页：
+  - 隐私模式：客户侧隐藏队伍码和 control session 细节，不暴露 fencing token。
+  - 维护模式：禁止新下单。
+  - 公告：展示到客户首页并通过 public settings API 返回。
+- `GET /api/public/settings` 客户侧读取维护/公告/隐私状态。
+- `POST /api/admin/login`、`GET/PUT /api/admin/settings` 商户后台 JSON API。
 
 ## 初始化测试卡密
 
 当前 MVP 没暴露后台制卡 UI。开发/测试可直接调用服务对象或写库：`recharge_cards.code_hash` 为卡密大写去空格后的 SHA-256。正式后台可在下一阶段接入。
+
+## 商户后台默认账号
+
+首次启动时，如果 `merchant_admins` 为空，会按环境变量创建一个 owner 管理员：
+
+```text
+MERCHANT_ADMIN_USERNAME=admin
+MERCHANT_ADMIN_PASSWORD=admin123456
+```
+
+生产部署前请务必改掉默认密码。

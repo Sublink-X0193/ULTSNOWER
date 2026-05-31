@@ -280,3 +280,50 @@ def test_session_renew_worker(app_and_bridge):
     res = client.post("/internal/workers/session-renew").json()
     assert res["renewed"] == 1
     assert bridge.renew_calls == [order["binding"]["control_session_id"]]
+
+
+def test_admin_settings_privacy_announcement_and_maintenance(app_and_bridge):
+    app, _bridge = app_and_bridge
+    client = TestClient(app)
+
+    login = client.post("/api/admin/login", json={"username": "admin", "password": "admin123456"})
+    assert login.status_code == 200, login.text
+    saved = client.put(
+        "/api/admin/settings",
+        json={
+            "privacy_mode_enabled": True,
+            "maintenance_mode_enabled": False,
+            "announcement_enabled": True,
+            "announcement_text": "今晚 22:00 维护",
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    public_settings = client.get("/api/public/settings").json()["settings"]
+    assert public_settings["privacy_mode_enabled"] is True
+    assert public_settings["announcement_text"] == "今晚 22:00 维护"
+
+    register_and_login(client, "privacy_user")
+    app.state.service.add_recharge_card("PRIV-10", minutes=10)
+    client.post("/api/recharge/redeem", json={"code": "PRIV-10"})
+    order = client.post("/api/orders", json={"requested_minutes": 5, "team_code": "SECRETTEAM"}).json()["order"]
+    assert order["team_code"] != "SECRETTEAM"
+    assert order["team_code_masked"] is True
+    assert "fencing_token" not in order["binding"]
+    assert "merchant_context_ref" not in order["binding"]
+
+    saved = client.put(
+        "/api/admin/settings",
+        json={
+            "privacy_mode_enabled": True,
+            "maintenance_mode_enabled": True,
+            "announcement_enabled": True,
+            "announcement_text": "维护中",
+        },
+    )
+    assert saved.status_code == 200
+    register_and_login(client, "blocked_user")
+    app.state.service.add_recharge_card("MAINT-10", minutes=10)
+    client.post("/api/recharge/redeem", json={"code": "MAINT-10"})
+    blocked = client.post("/api/orders", json={"requested_minutes": 5, "team_code": "MAINT"})
+    assert blocked.status_code == 503
+    assert blocked.json()["error"] == "maintenance_mode"

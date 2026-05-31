@@ -27,6 +27,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     db = Database(db_path or settings.db_path)
     bridge = bridge_client or BridgeClient(settings.bridge_base_url, settings.bridge_merchant_key, settings.bridge_merchant_secret)
     service = MerchantService(db, bridge, merchant_ref_secret=settings.merchant_ref_secret, session_ttl_seconds=settings.session_ttl_seconds)
+    service.ensure_default_admin(settings.default_admin_username, settings.default_admin_password)
 
     async def background_loop() -> None:
         while True:
@@ -77,6 +78,21 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     def clear_session_cookie(resp: Response) -> None:
         resp.delete_cookie("merchant_session")
 
+    def current_admin(request: Request) -> dict[str, Any]:
+        admin = service.admin_from_session(request.cookies.get("merchant_admin_session"))
+        if not admin:
+            raise MerchantError("admin_login_required", "请先登录商户后台", 401)
+        return admin
+
+    def maybe_admin(request: Request) -> dict[str, Any] | None:
+        return service.admin_from_session(request.cookies.get("merchant_admin_session"))
+
+    def set_admin_cookie(resp: Response, sid: str) -> None:
+        resp.set_cookie("merchant_admin_session", sid, httponly=True, samesite="lax", max_age=settings.session_ttl_seconds)
+
+    def clear_admin_cookie(resp: Response) -> None:
+        resp.delete_cookie("merchant_admin_session")
+
     @app.get("/health")
     def health() -> dict[str, Any]:
         return json_ok(service="merchant_portal", version="0.1.0")
@@ -86,12 +102,19 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         customer = maybe_customer(request)
         if not customer:
             return HTMLResponse(_layout("欢迎", '<p>请 <a href="/login">登录</a> 或 <a href="/register">注册</a></p>'))
-        current = service.current_order(customer["id"])
+        merchant_settings = service.get_settings()
+        current = service.public_order(service.current_order(customer["id"]), privacy_mode=bool(merchant_settings.get("privacy_mode_enabled")))
         try:
             capacity = service.bridge.get_capacity()
         except Exception as e:  # UI should keep rendering even when bridge is down
             capacity = {"available": False, "capacity_label": "unknown", "error": str(e)}
+        banner = ""
+        if merchant_settings.get("announcement_enabled") and merchant_settings.get("announcement_text"):
+            banner += f"<div style='background:#eef6ff;border:1px solid #9ec5fe;padding:10px;border-radius:8px'>公告：{_escape(merchant_settings.get('announcement_text'))}</div>"
+        if merchant_settings.get("maintenance_mode_enabled"):
+            banner += "<div style='background:#fff3cd;border:1px solid #ffda6a;padding:10px;border-radius:8px;margin-top:8px'>维护模式已开启：暂时不能新下单。</div>"
         body = f"""
+        {banner}
         <h2>你好，{customer['username']}</h2>
         <p>分钟余额：<b>{customer['balance_minutes']}</b></p>
         <p>中央容量：<b>{capacity.get('capacity_label')}</b> / 可用：{capacity.get('available')}</p>
@@ -143,6 +166,9 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
 
     @app.get("/orders/new", response_class=HTMLResponse)
     def new_order_page(_customer: dict[str, Any] = Depends(current_customer)) -> HTMLResponse:
+        merchant_settings = service.get_settings()
+        if merchant_settings.get("maintenance_mode_enabled"):
+            return HTMLResponse(_layout("下单", "<p>维护模式已开启，暂时不能新下单。</p><p><a href='/'>返回</a></p>"))
         return HTMLResponse(_layout("下单", _form("/orders", [("requested_minutes", "分钟"), ("team_code", "队伍码"), ("quality", "配置/品质")], "下单")))
 
     @app.post("/orders")
@@ -152,11 +178,65 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
 
     @app.get("/orders/current", response_class=HTMLResponse)
     def current_order_page(customer: dict[str, Any] = Depends(current_customer)) -> HTMLResponse:
-        return HTMLResponse(_layout("当前订单", f"<pre>{service.current_order(customer['id']) or '暂无当前订单'}</pre><p><a href='/'>返回</a></p>"))
+        return HTMLResponse(_layout("当前订单", f"<pre>{service.public_order(service.current_order(customer['id'])) or '暂无当前订单'}</pre><p><a href='/'>返回</a></p>"))
 
     @app.get("/orders/history", response_class=HTMLResponse)
     def history_page(customer: dict[str, Any] = Depends(current_customer)) -> HTMLResponse:
-        return HTMLResponse(_layout("历史订单", "<pre>" + repr(service.order_history(customer["id"])) + "</pre><p><a href='/'>返回</a></p>"))
+        return HTMLResponse(_layout("历史订单", "<pre>" + repr(service.public_orders(service.order_history(customer["id"]))) + "</pre><p><a href='/'>返回</a></p>"))
+
+    @app.get("/merchant-admin/login", response_class=HTMLResponse)
+    def admin_login_page() -> HTMLResponse:
+        return HTMLResponse(_layout("商户后台登录", _form("/merchant-admin/login", [("username", "管理员"), ("password", "密码", "password")], "登录")))
+
+    @app.post("/merchant-admin/login")
+    def admin_login_form(username: str = Form(...), password: str = Form(...)) -> RedirectResponse:
+        admin = service.authenticate_admin(username, password)
+        sid = service.create_admin_session(admin["id"])
+        resp = RedirectResponse("/merchant-admin", status_code=303)
+        set_admin_cookie(resp, sid)
+        return resp
+
+    @app.post("/merchant-admin/logout")
+    def admin_logout(request: Request) -> RedirectResponse:
+        service.delete_admin_session(request.cookies.get("merchant_admin_session") or "")
+        resp = RedirectResponse("/merchant-admin/login", status_code=303)
+        clear_admin_cookie(resp)
+        return resp
+
+    @app.get("/merchant-admin", response_class=HTMLResponse)
+    def admin_home(admin: dict[str, Any] = Depends(current_admin)) -> HTMLResponse:
+        merchant_settings = service.get_settings()
+        body = f"""
+        <p>管理员：{admin['username']} / {admin['role']}</p>
+        <form method="post" action="/merchant-admin/settings">
+          <label><input type="checkbox" name="privacy_mode_enabled" value="1" {'checked' if merchant_settings.get('privacy_mode_enabled') else ''}> 隐私模式：客户侧隐藏队伍码/控制会话细节</label><br>
+          <label><input type="checkbox" name="maintenance_mode_enabled" value="1" {'checked' if merchant_settings.get('maintenance_mode_enabled') else ''}> 维护模式：禁止新下单</label><br>
+          <label><input type="checkbox" name="announcement_enabled" value="1" {'checked' if merchant_settings.get('announcement_enabled') else ''}> 开启公告</label><br>
+          <label>公告内容<br><textarea name="announcement_text" rows="6" cols="80">{_escape(merchant_settings.get('announcement_text') or '')}</textarea></label><br>
+          <button type="submit">保存设置</button>
+        </form>
+        <form method="post" action="/merchant-admin/logout"><button>退出后台</button></form>
+        """
+        return HTMLResponse(_layout("商户后台配置", body))
+
+    @app.post("/merchant-admin/settings")
+    def admin_settings_form(
+        privacy_mode_enabled: str | None = Form(None),
+        maintenance_mode_enabled: str | None = Form(None),
+        announcement_enabled: str | None = Form(None),
+        announcement_text: str = Form(""),
+        admin: dict[str, Any] = Depends(current_admin),
+    ) -> RedirectResponse:
+        service.update_settings(
+            admin["id"],
+            {
+                "privacy_mode_enabled": privacy_mode_enabled == "1",
+                "maintenance_mode_enabled": maintenance_mode_enabled == "1",
+                "announcement_enabled": announcement_enabled == "1",
+                "announcement_text": announcement_text,
+            },
+        )
+        return RedirectResponse("/merchant-admin", status_code=303)
 
     # JSON API
     @app.post("/api/register")
@@ -183,6 +263,16 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     def api_me(customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
         return json_ok(customer=service.get_customer(customer["id"]))
 
+    @app.get("/api/public/settings")
+    def api_public_settings() -> dict[str, Any]:
+        merchant_settings = service.get_settings()
+        return json_ok(settings={
+            "privacy_mode_enabled": merchant_settings["privacy_mode_enabled"],
+            "maintenance_mode_enabled": merchant_settings["maintenance_mode_enabled"],
+            "announcement_enabled": merchant_settings["announcement_enabled"],
+            "announcement_text": merchant_settings["announcement_text"] if merchant_settings["announcement_enabled"] else "",
+        })
+
     @app.get("/api/capacity")
     def api_capacity(_customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
         return json_ok(capacity=service.bridge.get_capacity())
@@ -200,15 +290,37 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
             quality=body.get("quality") or "standard",
             idempotency_key=request.headers.get("X-Idempotency-Key"),
         )
+        result = {**result, "order": service.public_order(result.get("order"))}
         return json_ok(**result)
 
     @app.get("/api/orders/current")
     def api_current_order(customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
-        return json_ok(order=service.current_order(customer["id"]))
+        return json_ok(order=service.public_order(service.current_order(customer["id"])))
 
     @app.get("/api/orders/history")
     def api_history(customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
-        return json_ok(orders=service.order_history(customer["id"]))
+        return json_ok(orders=service.public_orders(service.order_history(customer["id"])))
+
+    @app.post("/api/admin/login")
+    def api_admin_login(response: Response, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        admin = service.authenticate_admin(body.get("username") or "", body.get("password") or "")
+        sid = service.create_admin_session(admin["id"])
+        set_admin_cookie(response, sid)
+        return json_ok(admin=admin)
+
+    @app.post("/api/admin/logout")
+    def api_admin_logout(request: Request, response: Response) -> dict[str, Any]:
+        service.delete_admin_session(request.cookies.get("merchant_admin_session") or "")
+        clear_admin_cookie(response)
+        return json_ok()
+
+    @app.get("/api/admin/settings")
+    def api_admin_get_settings(_admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        return json_ok(settings=service.get_settings())
+
+    @app.put("/api/admin/settings")
+    def api_admin_put_settings(body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        return json_ok(settings=service.update_settings(admin["id"], body))
 
     @app.post("/internal/workers/events")
     def run_events() -> dict[str, Any]:
@@ -243,3 +355,9 @@ def _form(action: str, fields: list[tuple], submit: str) -> str:
         parts.append(f'<label>{label}<input name="{name}" type="{typ}"></label><br>')
     parts.append(f'<button type="submit">{submit}</button></form><p><a href="/">返回</a></p>')
     return "".join(parts)
+
+
+def _escape(value: Any) -> str:
+    import html
+
+    return html.escape(str(value or ""), quote=True)
