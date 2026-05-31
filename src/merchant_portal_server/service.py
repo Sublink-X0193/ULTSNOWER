@@ -406,6 +406,99 @@ class MerchantService:
             con.execute("UPDATE local_orders SET status='stopping',fail_reason='admin_stop',updated_at=? WHERE id=?", (iso(), order_id))
         return self.admin_get_order(order_id)
 
+    def assert_customer_order(self, order_id: int, customer_id: int) -> dict[str, Any]:
+        with self.db.connect() as con:
+            row = con.execute("SELECT * FROM local_orders WHERE id=? AND customer_id=?", (order_id, customer_id)).fetchone()
+            if not row:
+                raise MerchantError("not_found", "订单不存在", 404)
+            return self._order_with_binding(con, order_id)
+
+    def customer_stop_order(self, order_id: int, customer_id: int) -> dict[str, Any]:
+        with self.db.connect() as con:
+            row = con.execute(
+                """SELECT o.*, b.control_session_id, b.fencing_token
+                   FROM local_orders o LEFT JOIN order_control_bindings b ON b.local_order_id=o.id
+                   WHERE o.id=? AND o.customer_id=?""",
+                (order_id, customer_id),
+            ).fetchone()
+            if not row:
+                raise MerchantError("not_found", "订单不存在", 404)
+            if row["status"] not in ACTIVE_ORDER_STATUSES:
+                raise MerchantError("bad_order_status", "订单不在可结束状态", 409)
+
+        if row["control_session_id"] and row["fencing_token"] and self.bridge:
+            try:
+                self.bridge.queue_stop(row["control_session_id"], fencing_token=row["fencing_token"], idem=f"customer-stop:{row['local_order_no']}:v1", reason="merchant_customer_stop")
+            except BridgeClientError as e:
+                raise MerchantError(e.code, e.message, e.status_code)
+
+        order_dict = dict(row)
+        refund_minutes = self._remaining_minutes(order_dict)
+        refund_rounds = int(order_dict.get("requested_rounds") or 0)
+        now_s = iso()
+        with self.db.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            try:
+                fresh = con.execute("SELECT * FROM local_orders WHERE id=? AND customer_id=?", (order_id, customer_id)).fetchone()
+                if not fresh:
+                    raise MerchantError("not_found", "订单不存在", 404)
+                if fresh["status"] not in ACTIVE_ORDER_STATUSES:
+                    raise MerchantError("bad_order_status", "订单不在可结束状态", 409)
+                already_refunded = con.execute(
+                    "SELECT 1 FROM refund_records WHERE local_order_id=? AND reason='customer_stop'",
+                    (order_id,),
+                ).fetchone()
+                if not already_refunded and (refund_minutes > 0 or refund_rounds > 0):
+                    con.execute(
+                        "UPDATE customers SET balance_minutes=balance_minutes+?,balance_rounds=balance_rounds+?,updated_at=? WHERE id=?",
+                        (refund_minutes, refund_rounds, now_s, customer_id),
+                    )
+                    con.execute(
+                        "INSERT OR IGNORE INTO refund_records(local_order_id,customer_id,minutes,rounds,reason,created_at) VALUES(?,?,?,?,?,?)",
+                        (order_id, customer_id, refund_minutes, refund_rounds, "customer_stop", now_s),
+                    )
+                con.execute(
+                    "UPDATE local_orders SET status='stopping',fail_reason='customer_stop',updated_at=? WHERE id=?",
+                    (now_s, order_id),
+                )
+                con.commit()
+            except Exception:
+                con.rollback()
+                raise
+        return self.admin_get_order(order_id)
+
+    def customer_rejoin_order(self, order_id: int, customer_id: int, team_code: str) -> dict[str, Any]:
+        team_code = str(team_code or "").strip().upper()
+        if team_code and not (3 <= len(team_code) <= 32):
+            raise MerchantError("bad_team_code", "队伍码长度不合法")
+        with self.db.connect() as con:
+            row = con.execute(
+                """SELECT o.*, b.control_session_id, b.fencing_token, b.last_device_epoch
+                   FROM local_orders o LEFT JOIN order_control_bindings b ON b.local_order_id=o.id
+                   WHERE o.id=? AND o.customer_id=?""",
+                (order_id, customer_id),
+            ).fetchone()
+            if not row:
+                raise MerchantError("not_found", "订单不存在", 404)
+            if row["status"] not in ACTIVE_ORDER_STATUSES:
+                raise MerchantError("bad_order_status", "订单不在可换队状态", 409)
+        if team_code and row["control_session_id"] and row["fencing_token"] and hasattr(self.bridge, "queue_command"):
+            try:
+                self.bridge.queue_command(
+                    row["control_session_id"],
+                    fencing_token=row["fencing_token"],
+                    action="enter_team",
+                    params={"team_code": team_code, "clear_existing": True},
+                    expected_device_epoch=int(row["last_device_epoch"] or 0),
+                    idem=f"customer-rejoin:{row['local_order_no']}:{team_code}",
+                )
+            except BridgeClientError as e:
+                raise MerchantError(e.code, e.message, e.status_code)
+        if team_code:
+            with self.db.connect() as con:
+                con.execute("UPDATE local_orders SET team_code=?,updated_at=? WHERE id=?", (team_code, iso(), order_id))
+        return self.admin_get_order(order_id)
+
     # ---------- merchant admin / settings ----------
     def ensure_default_admin(self, username: str, password: str) -> None:
         username = str(username or "").strip()
@@ -814,21 +907,101 @@ class MerchantService:
                     (customer_id, code_hash, minutes, rounds, now_s),
                 )
                 con.commit()
-                return {"minutes": minutes, "rounds": rounds, "customer": self.get_customer(customer_id)}
+                return {"minutes": minutes, "rounds": rounds, "mode": card["mode"] or "machine", "card_type": card["card_type"] or "normal", "customer": self.get_customer(customer_id)}
             except Exception:
                 con.rollback()
                 raise
 
+    def night_login_card(self, code: str) -> dict[str, Any]:
+        code = str(code or "").strip()
+        if not code:
+            raise MerchantError("bad_card", "请输入卡密")
+        code_hash = hash_card_code(code)
+        suffix = "".join(ch for ch in code[-6:] if ch.isalnum()).lower() or secrets.token_hex(3)
+        username_base = f"night_{suffix}"
+        now_s = iso()
+        with self.db.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            try:
+                card = con.execute("SELECT * FROM recharge_cards WHERE code_hash=?", (code_hash,)).fetchone()
+                if not card:
+                    raise MerchantError("card_not_found", "卡密不存在", 404)
+                if card["status"] != "unused":
+                    raise MerchantError("card_used", "卡密已使用", 409)
+                if str(card["card_type"] or "normal").lower() != "night":
+                    raise MerchantError("not_night_card", "仅包夜卡可使用包夜入口登录", 400)
+                settings = self._settings_locked(con)
+                if not self._night_time_allowed(settings):
+                    raise MerchantError(
+                        "night_time_not_allowed",
+                        f"包夜卡只能在 {settings.get('night_start_time') or '22:50'} 至次日 {settings.get('night_end_time') or '06:10'} 使用",
+                        403,
+                    )
+                username = username_base
+                for _ in range(10):
+                    if not con.execute("SELECT 1 FROM customers WHERE username=?", (username,)).fetchone():
+                        break
+                    username = f"{username_base}_{secrets.token_hex(2)}"
+                minutes = int(card["minutes"] or 0)
+                rounds = int(card["rounds"] or 0)
+                cur = con.execute(
+                    "INSERT INTO customers(username,password_hash,balance_minutes,balance_rounds,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                    (username, hash_password(secrets.token_urlsafe(18)), minutes, rounds, "active", now_s, now_s),
+                )
+                customer_id = int(cur.lastrowid)
+                con.execute("UPDATE recharge_cards SET status='used',used_by_customer_id=?,used_at=? WHERE code_hash=?", (customer_id, now_s, code_hash))
+                con.execute(
+                    "INSERT INTO recharge_records(customer_id,code_hash,minutes,rounds,created_at) VALUES(?,?,?,?,?)",
+                    (customer_id, code_hash, minutes, rounds, now_s),
+                )
+                con.commit()
+                return self.get_customer(customer_id)
+            except Exception:
+                con.rollback()
+                raise
+
+    def recharge_history(self, customer_id: int, limit: int = 200) -> list[dict[str, Any]]:
+        with self.db.connect() as con:
+            rows = con.execute(
+                """SELECT rr.*, rc.code_plain, rc.mode, rc.card_type
+                   FROM recharge_records rr LEFT JOIN recharge_cards rc ON rc.code_hash=rr.code_hash
+                   WHERE rr.customer_id=?
+                   ORDER BY rr.id DESC LIMIT ?""",
+                (customer_id, max(1, min(int(limit or 200), 1000))),
+            ).fetchall()
+        out = []
+        for r in rows:
+            out.append({
+                "id": int(r["id"]),
+                "trade_no": f"CARD{int(r['id']):06d}",
+                "status": "paid",
+                "config_type": "card_redeem",
+                "mode": r["mode"] or "machine",
+                "card_type": r["card_type"] or "normal",
+                "minutes": int(r["minutes"] or 0),
+                "rounds": int(r["rounds"] or 0),
+                "value_rounds": int(r["rounds"] or 0),
+                "absolute_rounds": int(r["rounds"] or 0),
+                "price": 0,
+                "card_code": r["code_plain"] or self._mask(r["code_hash"]),
+                "created_at": r["created_at"],
+                "paid_at": r["created_at"],
+            })
+        return out
+
     # ---------- orders ----------
-    def place_order(self, customer_id: int, *, requested_minutes: int, team_code: str, quality: str = "standard", idempotency_key: str | None = None) -> dict[str, Any]:
+    def place_order(self, customer_id: int, *, requested_minutes: int, team_code: str, quality: str = "standard", requested_rounds: int = 0, idempotency_key: str | None = None) -> dict[str, Any]:
         requested_minutes = int(requested_minutes or 0)
+        requested_rounds = max(0, int(requested_rounds or 0))
         team_code = str(team_code or "").strip().upper()
         quality = str(quality or "standard").strip() or "standard"
         if requested_minutes <= 0 or requested_minutes > 24 * 60:
             raise MerchantError("bad_minutes", "购买分钟数不合法")
+        if requested_rounds > 10000:
+            raise MerchantError("bad_rounds", "战损局数不合法")
         if not (3 <= len(team_code) <= 32):
             raise MerchantError("bad_team_code", "队伍码长度不合法")
-        payload_hash = request_hash({"requested_minutes": requested_minutes, "team_code": team_code, "quality": quality})
+        payload_hash = request_hash({"requested_minutes": requested_minutes, "requested_rounds": requested_rounds, "team_code": team_code, "quality": quality})
         scope = f"order:create:{customer_id}"
         if idempotency_key:
             with self.db.connect() as con:
@@ -861,12 +1034,17 @@ class MerchantService:
                     raise MerchantError("maintenance_mode", str(msg), 503)
                 if int(customer["balance_minutes"] or 0) < requested_minutes:
                     raise MerchantError("insufficient_balance", "分钟余额不足", 402)
+                if requested_rounds and int(customer["balance_rounds"] or 0) < requested_rounds:
+                    raise MerchantError("insufficient_rounds", "战损余额不足", 402)
                 order_no = self._new_order_no()
-                con.execute("UPDATE customers SET balance_minutes=balance_minutes-?,updated_at=? WHERE id=?", (requested_minutes, now_s, customer_id))
+                con.execute(
+                    "UPDATE customers SET balance_minutes=balance_minutes-?,balance_rounds=balance_rounds-?,updated_at=? WHERE id=?",
+                    (requested_minutes, requested_rounds, now_s, customer_id),
+                )
                 cur = con.execute(
                     """INSERT INTO local_orders(customer_id,status,local_order_no,requested_minutes,requested_rounds,team_code,quality,amount_cents,created_at,updated_at)
                        VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                    (customer_id, "claiming_device", order_no, requested_minutes, 0, team_code, quality, 0, now_s, now_s),
+                    (customer_id, "claiming_device", order_no, requested_minutes, requested_rounds, team_code, quality, 0, now_s, now_s),
                 )
                 order_id = int(cur.lastrowid)
                 con.commit()
@@ -931,10 +1109,11 @@ class MerchantService:
                     return
                 if order["status"] not in {"failed", "refunded", "finished"}:
                     minutes = int(order["requested_minutes"] or 0)
-                    con.execute("UPDATE customers SET balance_minutes=balance_minutes+?,updated_at=? WHERE id=?", (minutes, iso(), int(order["customer_id"])))
+                    rounds = int(order["requested_rounds"] or 0)
+                    con.execute("UPDATE customers SET balance_minutes=balance_minutes+?,balance_rounds=balance_rounds+?,updated_at=? WHERE id=?", (minutes, rounds, iso(), int(order["customer_id"])))
                     con.execute(
                         "INSERT OR IGNORE INTO refund_records(local_order_id,customer_id,minutes,rounds,reason,created_at) VALUES(?,?,?,?,?,?)",
-                        (order_id, int(order["customer_id"]), minutes, 0, "bridge_claim_or_bundle_failed", iso()),
+                        (order_id, int(order["customer_id"]), minutes, rounds, "bridge_claim_or_bundle_failed", iso()),
                     )
                     con.execute("UPDATE local_orders SET status='failed',fail_reason=?,finished_at=?,updated_at=? WHERE id=?", (reason[:500], iso(), iso(), order_id))
                 con.commit()
@@ -1076,12 +1255,13 @@ class MerchantService:
         order_id = int(order["id"])
         customer_id = int(order["customer_id"])
         minutes = self._remaining_minutes(order)
+        rounds = int(order.get("requested_rounds") or 0)
         now_s = iso()
-        if minutes > 0:
-            con.execute("UPDATE customers SET balance_minutes=balance_minutes+?,updated_at=? WHERE id=?", (minutes, now_s, customer_id))
+        if minutes > 0 or rounds > 0:
+            con.execute("UPDATE customers SET balance_minutes=balance_minutes+?,balance_rounds=balance_rounds+?,updated_at=? WHERE id=?", (minutes, rounds, now_s, customer_id))
             con.execute(
                 "INSERT OR IGNORE INTO refund_records(local_order_id,customer_id,minutes,rounds,reason,created_at) VALUES(?,?,?,?,?,?)",
-                (order_id, customer_id, minutes, 0, reason, now_s),
+                (order_id, customer_id, minutes, rounds, reason, now_s),
             )
         con.execute("UPDATE local_orders SET status=?,fail_reason=?,finished_at=?,updated_at=? WHERE id=?", (target_status, reason, now_s, now_s, order_id))
 

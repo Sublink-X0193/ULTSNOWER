@@ -1,0 +1,635 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <link rel="apple-touch-icon" href="/static/favicon.svg">
+    <title>登录 - 粥粥宇电竞</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+            background: #ffffff;
+            min-height: 100vh;
+            display: flex;
+            position: relative;
+        }
+
+        /* 左侧品牌区 */
+        .brand-section {
+            flex: 1;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            padding: 60px;
+            position: relative;
+            overflow: hidden;
+        }
+        #particleCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        .brand-section::before {
+            display: none;
+        }
+        .brand-section::after {
+            display: none;
+        }
+        @keyframes float {
+            0%, 100% { transform: translate(0, 0); }
+            50% { transform: translate(30px, 30px); }
+        }
+        .brand-content {
+            position: relative;
+            z-index: 1;
+            text-align: center;
+        }
+        .brand-title {
+            font-size: 48px;
+            font-weight: 700;
+            color: #ffffff;
+            margin-bottom: 16px;
+            letter-spacing: -1px;
+        }
+        .brand-subtitle {
+            font-size: 18px;
+            color: #ffffff;
+            line-height: 1.6;
+        }
+
+        /* 右侧登录区 */
+        .login-section {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 60px;
+            background: #ffffff;
+        }
+        .login-card {
+            width: 100%;
+            max-width: 420px;
+            animation: slideIn 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+        @keyframes slideIn {
+            0% { opacity: 0; transform: translateX(30px); }
+            100% { opacity: 1; transform: translateX(0); }
+        }
+        .login-logo {
+            margin-bottom: 32px;
+        }
+        .login-logo .icon {
+            display: none;
+        }
+        .login-logo h1 {
+            font-size: 28px;
+            color: #1f2937;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+        .login-logo p {
+            font-size: 15px;
+            color: #6b7280;
+        }
+        .login-tabs {
+            display: flex;
+            margin-bottom: 28px;
+            gap: 8px;
+        }
+        .login-tab {
+            flex: 1;
+            padding: 10px;
+            text-align: center;
+            font-size: 14px;
+            cursor: pointer;
+            color: #6b7280;
+            background: #f9fafb;
+            border-radius: 8px;
+            transition: all 0.3s;
+            font-weight: 500;
+        }
+        .login-tab.active {
+            color: #fff;
+            background: #3b82f6;
+        }
+        .login-tab:hover:not(.active) {
+            background: #f3f4f6;
+            color: #3b82f6;
+        }
+        .login-panel {
+            display: none;
+            animation: panelFadeIn 0.4s ease-out;
+        }
+        .login-panel.active { display: block; }
+        @keyframes panelFadeIn {
+            0% { opacity: 0; transform: translateX(-20px); }
+            100% { opacity: 1; transform: translateX(0); }
+        }
+        .form-group {
+            margin-bottom: 18px;
+        }
+        .form-group label {
+            display: block;
+            font-size: 13px;
+            color: #374151;
+            margin-bottom: 8px;
+            font-weight: 500;
+        }
+        .form-group input {
+            width: 100%;
+            padding: 11px 14px;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            font-size: 14px;
+            outline: none;
+            transition: all 0.2s;
+            background: #fff;
+        }
+        .form-group input:focus {
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 3px rgba(59,130,246,0.1);
+        }
+        .login-btn {
+            width: 100%;
+            padding: 11px;
+            background: #3b82f6;
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            font-size: 15px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            margin-top: 8px;
+        }
+        .login-btn.night {
+            background: #8b5cf6;
+        }
+        .login-btn:hover {
+            background: #2563eb;
+        }
+        .login-btn.night:hover {
+            background: #7c3aed;
+        }
+        .login-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+        .msg {
+            text-align: center;
+            font-size: 13px;
+            margin-top: 12px;
+            min-height: 20px;
+        }
+        .msg.error { color: #ef4444; }
+        .msg.success { color: #22c55e; }
+        .footer-link {
+            text-align: center;
+            margin-top: 20px;
+            font-size: 14px;
+            color: #6b7280;
+        }
+        .footer-link a {
+            color: #3b82f6;
+            text-decoration: none;
+            font-weight: 500;
+        }
+        .footer-link a:hover { text-decoration: underline; }
+        .night-hint {
+            font-size: 13px;
+            color: #7c3aed;
+            text-align: center;
+            margin-bottom: 16px;
+            padding: 10px;
+            background: #f5f3ff;
+            border-radius: 8px;
+            border: 1px solid #e9d5ff;
+        }
+
+        /* 页面过渡动画 - 擦除效果 */
+        .page-transition {
+            position: fixed;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            z-index: 9999;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: left 0.6s cubic-bezier(0.77, 0, 0.175, 1);
+        }
+        .page-transition.active {
+            left: 0;
+        }
+        .transition-content {
+            text-align: center;
+            color: white;
+            opacity: 0;
+            animation: fadeIn 0.3s 0.3s forwards;
+        }
+        @keyframes fadeIn {
+            to { opacity: 1; }
+        }
+        .transition-spinner {
+            width: 50px;
+            height: 50px;
+            border: 4px solid rgba(255,255,255,0.3);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* 移动端适配 */
+        @media (max-width: 768px) {
+            body {
+                flex-direction: column;
+                -webkit-text-size-adjust: 100%;
+            }
+            .brand-section {
+                display: none;
+            }
+            .login-section {
+                padding: 20px;
+                min-height: 100vh;
+            }
+            .login-card {
+                max-width: 100%;
+            }
+            .login-logo h1 {
+                font-size: 24px;
+            }
+            .login-logo p {
+                font-size: 13px;
+            }
+            /* iOS 防自动缩放 (input >= 16px) */
+            .form-group input {
+                font-size: 16px;
+                padding: 12px 14px;
+                min-height: 44px;
+            }
+            .login-btn {
+                font-size: 16px;
+                padding: 13px;
+                min-height: 46px;
+            }
+            .login-tab {
+                padding: 12px 8px;
+                font-size: 14px;
+                min-height: 44px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- 页面过渡层 -->
+    <div class="page-transition" id="pageTransition">
+        <div class="transition-content">
+            <div class="transition-spinner"></div>
+            <p>正在跳转...</p>
+        </div>
+    </div>
+
+    <!-- 左侧品牌区 -->
+    <div class="brand-section">
+        <canvas id="particleCanvas"></canvas>
+        <div class="brand-content">
+            <h1 class="brand-title">粥粥宇电竞</h1>
+            <p class="brand-subtitle" id="currentTime"></p>
+        </div>
+    </div>
+
+    <!-- 右侧登录区 -->
+    <div class="login-section">
+        <div class="login-card">
+        <div class="login-logo">
+            <div class="icon">A</div>
+            <h1>粥粥宇电竞</h1>
+            <p>当前位于：粥粥宇电竞 - 请登录您的账号</p>
+        </div>
+
+        <div class="login-tabs">
+            <div class="login-tab active" data-panel="normal">账号登录</div>
+            <div class="login-tab" data-panel="night">包夜卡登录</div>
+        </div>
+
+        <!-- 账号登录 -->
+        <div id="panel-normal" class="login-panel active">
+            <form id="loginForm" onsubmit="doLogin(event)">
+                <div class="form-group">
+                    <label>用户名</label>
+                    <input type="text" id="username" placeholder="请输入用户名" autocomplete="username" required />
+                </div>
+                <div class="form-group">
+                    <label>密码</label>
+                    <input type="password" id="password" placeholder="请输入密码" autocomplete="current-password" required />
+                </div>
+                <button type="submit" class="login-btn" id="loginBtn">登 录</button>
+                <button type="button" class="login-btn" id="quickLoginBtn" style="display:none;background:#10b981;margin-top:10px;" onclick="quickLogin()">快速登录</button>
+            </form>
+            <div class="footer-link">
+                没有账号？<a href="#" onclick="goToRegister(); return false;">立即注册</a>
+            </div>
+        </div>
+
+        <!-- 包夜卡登录 -->
+        <div id="panel-night" class="login-panel">
+            <div class="night-hint" id="nightHint">包夜卡仅限每天 23:00 - 次日 04:00 期间登录</div>
+            <form id="nightForm" onsubmit="doNightLogin(event)">
+                <div class="form-group">
+                    <label>包夜卡密</label>
+                    <input type="text" id="nightCard" placeholder="请输入包夜卡密" />
+                </div>
+                <button type="submit" class="login-btn night" id="nightBtn">包夜卡登录</button>
+            </form>
+        </div>
+
+        <div id="msg" class="msg"></div>
+        </div>
+    </div>
+
+    <script>
+        const tenantId = 5782;
+
+        // 固定加密密钥
+        const ENCRYPT_KEY = 'AdminQuickLogin2026Secret';
+
+        // 简单加密函数
+        function encrypt(text) {
+            let result = '';
+            for (let i = 0; i < text.length; i++) {
+                result += String.fromCharCode(text.charCodeAt(i) ^ ENCRYPT_KEY.charCodeAt(i % ENCRYPT_KEY.length));
+            }
+            // 使用 encodeURIComponent 处理中文字符
+            return btoa(encodeURIComponent(result));
+        }
+
+        // 简单解密函数
+        function decrypt(encoded) {
+            try {
+                const text = decodeURIComponent(atob(encoded));
+                let result = '';
+                for (let i = 0; i < text.length; i++) {
+                    result += String.fromCharCode(text.charCodeAt(i) ^ ENCRYPT_KEY.charCodeAt(i % ENCRYPT_KEY.length));
+                }
+                return result;
+            } catch (e) {
+                return null;
+            }
+        }
+
+        // 页面加载时检查localStorage是否有保存的管理员配置
+        (function checkAdminConfig() {
+            const config = localStorage.getItem('adminQuickLogin');
+            if (config) {
+                document.getElementById('quickLoginBtn').style.display = 'block';
+            }
+        })();
+
+        // 加载包夜卡时间窗口配置并更新提示
+        (async function loadNightConfig() {
+            try {
+                const res = await fetch('/api/night-config?tenant=' + tenantId);
+                const data = await res.json();
+                const hint = document.getElementById('nightHint');
+                if (data.ok) {
+                    if (!data.enabled) {
+                        hint.textContent = '包夜卡登录无时间限制';
+                    } else {
+                        hint.textContent = `包夜卡仅限每天 ${data.start_time} - 次日 ${data.end_time} 期间登录`;
+                    }
+                }
+            } catch (e) {}
+        })();
+
+        // Tab切换
+        document.querySelectorAll('.login-tab').forEach(tab => {
+            tab.onclick = () => {
+                document.querySelectorAll('.login-tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.login-panel').forEach(p => p.classList.remove('active'));
+                tab.classList.add('active');
+                document.getElementById('panel-' + tab.dataset.panel).classList.add('active');
+                document.getElementById('msg').textContent = '';
+            };
+        });
+
+        // 账号登录
+        async function doLogin(e) {
+            e.preventDefault();
+            const btn = document.getElementById('loginBtn');
+            const msg = document.getElementById('msg');
+            const username = document.getElementById('username').value.trim();
+            const password = document.getElementById('password').value.trim();
+
+            if (!username || !password) {
+                msg.className = 'msg error';
+                msg.textContent = '请输入用户名和密码';
+                return;
+            }
+
+            btn.disabled = true;
+            btn.textContent = '登录中...';
+            msg.textContent = '';
+
+            try {
+                const res = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password, tenant_id: tenantId })
+                });
+                const data = await res.json();
+
+                if (data.ok) {
+                    // 管理员登录成功后询问是否保存
+                    if (data.role === 'admin') {
+                        try {
+                            const saved = localStorage.getItem('adminQuickLogin');
+                            const message = saved ? '是否更新保存的快速登录配置？' : '是否保存登录信息以便下次快速登录？';
+                            if (confirm(message)) {
+                                const config = encrypt(JSON.stringify({ username, password }));
+                                localStorage.setItem('adminQuickLogin', config);
+                            }
+                        } catch (e) {
+                            console.error('保存配置失败:', e);
+                        }
+                    }
+                    msg.className = 'msg success';
+                    msg.textContent = '登录成功，正在跳转...';
+                    document.getElementById('pageTransition').classList.add('active');
+                    setTimeout(() => { window.location.href = data.redirect; }, 800);
+                } else {
+                    msg.className = 'msg error';
+                    msg.textContent = data.msg || '登录失败';
+                    btn.disabled = false;
+                    btn.textContent = '登 录';
+                }
+            } catch (err) {
+                msg.className = 'msg error';
+                msg.textContent = '网络错误，请重试';
+                btn.disabled = false;
+                btn.textContent = '登 录';
+            }
+        }
+
+        // 快速登录
+        async function quickLogin() {
+            const btn = document.getElementById('quickLoginBtn');
+            const msg = document.getElementById('msg');
+
+            btn.disabled = true;
+            btn.textContent = '登录中...';
+            msg.textContent = '';
+
+            try {
+                const configStr = localStorage.getItem('adminQuickLogin');
+                if (!configStr) {
+                    msg.className = 'msg error';
+                    msg.textContent = '未找到保存的配置';
+                    btn.disabled = false;
+                    btn.textContent = '快速登录';
+                    return;
+                }
+
+                const decrypted = decrypt(configStr);
+                if (!decrypted) {
+                    msg.className = 'msg error';
+                    msg.textContent = '配置解密失败';
+                    btn.disabled = false;
+                    btn.textContent = '快速登录';
+                    return;
+                }
+
+                const config = JSON.parse(decrypted);
+
+                const res = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username: config.username, password: config.password, tenant_id: tenantId })
+                });
+                const data = await res.json();
+
+                if (data.ok) {
+                    msg.className = 'msg success';
+                    msg.textContent = '登录成功，正在跳转...';
+                    document.getElementById('pageTransition').classList.add('active');
+                    setTimeout(() => { window.location.href = data.redirect; }, 800);
+                } else {
+                    msg.className = 'msg error';
+                    msg.textContent = data.msg || '登录失败';
+                    btn.disabled = false;
+                    btn.textContent = '快速登录';
+                }
+            } catch (err) {
+                msg.className = 'msg error';
+                msg.textContent = '网络错误，请重试';
+                btn.disabled = false;
+                btn.textContent = '快速登录';
+            }
+        }
+
+        // 包夜卡登录
+        async function doNightLogin(e) {
+            e.preventDefault();
+            const btn = document.getElementById('nightBtn');
+            const msg = document.getElementById('msg');
+            const cardCode = document.getElementById('nightCard').value.trim();
+
+            if (!cardCode) {
+                msg.className = 'msg error';
+                msg.textContent = '请输入包夜卡密';
+                return;
+            }
+
+            btn.disabled = true;
+            btn.textContent = '验证中...';
+            msg.textContent = '';
+
+            try {
+                const res = await fetch('/api/night-login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ card_code: cardCode, tenant_id: tenantId })
+                });
+                const data = await res.json();
+
+                if (data.ok) {
+                    msg.className = 'msg success';
+                    msg.textContent = '包夜卡登录成功，正在跳转...';
+                    document.getElementById('pageTransition').classList.add('active');
+                    setTimeout(() => { window.location.href = data.redirect; }, 800);
+                } else {
+                    msg.className = 'msg error';
+                    msg.textContent = data.msg || '登录失败';
+                    btn.disabled = false;
+                    btn.textContent = '包夜卡登录';
+                }
+            } catch (err) {
+                msg.className = 'msg error';
+                msg.textContent = '网络错误，请重试';
+                btn.disabled = false;
+                btn.textContent = '包夜卡登录';
+            }
+        }
+
+        // 跳转到注册页面（携带租户参数）
+        function goToRegister() {
+            if (tenantId && tenantId !== '0') {
+                window.location.href = '/register?tenant=' + tenantId;
+            } else {
+                window.location.href = '/register';
+            }
+        }
+
+        // 粒子动画
+        const canvas = document.getElementById('particleCanvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = canvas.offsetWidth;
+        canvas.height = canvas.offsetHeight;
+
+        const particles = [];
+        for (let i = 0; i < 50; i++) {
+            particles.push({
+                x: Math.random() * canvas.width,
+                y: Math.random() * canvas.height,
+                vx: (Math.random() - 0.5) * 0.5,
+                vy: (Math.random() - 0.5) * 0.5,
+                r: Math.random() * 2 + 1
+            });
+        }
+
+        function animate() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = 'rgba(255,255,255,0.5)';
+            particles.forEach(p => {
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+                ctx.fill();
+                p.x += p.vx;
+                p.y += p.vy;
+                if (p.x < 0 || p.x > canvas.width) p.vx *= -1;
+                if (p.y < 0 || p.y > canvas.height) p.vy *= -1;
+            });
+            requestAnimationFrame(animate);
+        }
+        animate();
+
+        // 更新时间
+        function updateTime() {
+            const now = new Date();
+            const time = now.toLocaleTimeString('zh-CN', { hour12: false });
+            const date = now.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
+            document.getElementById('currentTime').textContent = `${date} ${time}`;
+        }
+        updateTime();
+        setInterval(updateTime, 1000);
+    </script>
+</body>
+</html>

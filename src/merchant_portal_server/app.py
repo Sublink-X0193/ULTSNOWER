@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +11,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from .bridge_client import BridgeClient, BridgeClientError
 from .config import Settings, load_settings
-from .db import Database
+from .db import Database, parse_ts
 from .service import MerchantError, MerchantService
 
 
@@ -19,7 +20,7 @@ def json_ok(**payload: Any) -> dict[str, Any]:
 
 
 def json_fail(code: str, message: str, status_code: int = 400) -> JSONResponse:
-    return JSONResponse({"ok": False, "error": code, "message": message}, status_code=status_code)
+    return JSONResponse({"ok": False, "error": code, "message": message, "msg": message}, status_code=status_code)
 
 
 def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None = None, settings: Settings | None = None) -> FastAPI:
@@ -58,6 +59,11 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     @app.get("/favicon.ico", include_in_schema=False)
     def favicon() -> Response:
         return Response(status_code=204)
+
+    @app.get("/static/favicon.svg", include_in_schema=False)
+    def static_favicon_svg() -> Response:
+        svg = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='#3b82f6'/><path d='M18 36c7-16 21-16 28 0M22 43h20' stroke='white' stroke-width='5' stroke-linecap='round' fill='none'/></svg>"
+        return Response(svg, media_type="image/svg+xml")
 
     @app.exception_handler(MerchantError)
     async def merchant_error_handler(_request: Request, exc: MerchantError) -> JSONResponse:
@@ -133,49 +139,45 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     def health() -> dict[str, Any]:
         return json_ok(service="merchant_portal", version="0.1.0")
 
+    def customer_home_html(customer: dict[str, Any]) -> HTMLResponse:
+        merchant_settings = service.get_settings()
+        return HTMLResponse(_legacy_customer_html(customer, merchant_settings))
+
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request) -> HTMLResponse:
         customer = maybe_customer(request)
         if not customer:
-            return HTMLResponse(_layout("欢迎", '<p>请 <a href="/login">登录</a> 或 <a href="/register">注册</a></p>'))
-        merchant_settings = service.get_settings()
-        current = service.public_order(service.current_order(customer["id"]), privacy_mode=bool(merchant_settings.get("privacy_mode_enabled")))
-        try:
-            capacity = service.bridge.get_capacity()
-        except Exception as e:  # UI should keep rendering even when bridge is down
-            capacity = {"available": False, "capacity_label": "unknown", "error": str(e)}
-        banner = ""
-        if merchant_settings.get("announcement_enabled") and merchant_settings.get("announcement_text"):
-            banner += f"<div style='background:#eef6ff;border:1px solid #9ec5fe;padding:10px;border-radius:8px'>公告：{_safe_notice_html(merchant_settings.get('announcement_text'))}</div>"
-        if merchant_settings.get("global_radar_url"):
-            url = _escape(merchant_settings.get("global_radar_url"))
-            banner += f"<div style='background:#f8fafc;border:1px solid #cbd5e1;padding:10px;border-radius:8px;margin-top:8px'>全局备注地址：<span style='font-family:Consolas,monospace'>{url}</span></div>"
-        if merchant_settings.get("maintenance_mode_enabled"):
-            msg = _escape(merchant_settings.get("maintenance_message") or "暂时不能新下单。")
-            banner += f"<div style='background:#fff3cd;border:1px solid #ffda6a;padding:10px;border-radius:8px;margin-top:8px'>维护模式已开启：{msg}</div>"
-        return HTMLResponse(_customer_dashboard_html(customer, current, capacity, merchant_settings, banner))
+            return RedirectResponse("/login", status_code=303)  # type: ignore[return-value]
+        return customer_home_html(customer)
+
+    @app.get("/customer", response_class=HTMLResponse)
+    def customer_page(request: Request) -> HTMLResponse:
+        customer = maybe_customer(request)
+        if not customer:
+            return RedirectResponse("/login", status_code=303)  # type: ignore[return-value]
+        return customer_home_html(customer)
 
     @app.get("/register", response_class=HTMLResponse)
     def register_page() -> HTMLResponse:
-        return HTMLResponse(_layout("注册", _form("/register", [("username", "用户名"), ("password", "密码", "password")], "注册")))
+        return HTMLResponse(_legacy_auth_html("register.html", service.get_settings()))
 
     @app.post("/register")
     def register_form(username: str = Form(...), password: str = Form(...)) -> RedirectResponse:
         customer = service.register_customer(username, password)
         sid = service.create_session(customer["id"])
-        resp = RedirectResponse("/", status_code=303)
+        resp = RedirectResponse("/customer", status_code=303)
         set_session_cookie(resp, sid)
         return resp
 
     @app.get("/login", response_class=HTMLResponse)
     def login_page() -> HTMLResponse:
-        return HTMLResponse(_layout("登录", _form("/login", [("username", "用户名"), ("password", "密码", "password")], "登录")))
+        return HTMLResponse(_legacy_auth_html("login.html", service.get_settings()))
 
     @app.post("/login")
     def login_form(username: str = Form(...), password: str = Form(...)) -> RedirectResponse:
         customer = service.authenticate(username, password)
         sid = service.create_session(customer["id"])
-        resp = RedirectResponse("/", status_code=303)
+        resp = RedirectResponse("/customer", status_code=303)
         set_session_cookie(resp, sid)
         return resp
 
@@ -267,24 +269,64 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         customer = service.register_customer(body.get("username") or "", body.get("password") or "")
         sid = service.create_session(customer["id"])
         set_session_cookie(response, sid)
-        return json_ok(customer=service.get_customer(customer["id"]))
+        return json_ok(msg="注册成功", user_id=customer["id"], redirect="/customer", customer=service.get_customer(customer["id"]))
 
     @app.post("/api/login")
     def api_login(response: Response, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
         customer = service.authenticate(body.get("username") or "", body.get("password") or "")
         sid = service.create_session(customer["id"])
         set_session_cookie(response, sid)
-        return json_ok(customer=customer)
+        return json_ok(msg="登录成功", redirect="/customer", role="customer", customer=customer)
 
     @app.post("/api/logout")
     def api_logout(request: Request, response: Response) -> dict[str, Any]:
         service.delete_session(request.cookies.get("merchant_session") or "")
         clear_session_cookie(response)
-        return json_ok()
+        return json_ok(msg="已退出", redirect="/login")
+
+    @app.post("/api/night-login")
+    def api_night_login(response: Response, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        customer = service.night_login_card(body.get("card_code") or body.get("code") or "")
+        sid = service.create_session(customer["id"])
+        set_session_cookie(response, sid)
+        return json_ok(msg="登录成功", redirect="/customer", role="night_card", customer=customer)
+
+    @app.get("/api/night-config")
+    def api_night_config() -> dict[str, Any]:
+        merchant_settings = service.get_settings()
+        return json_ok(
+            enabled=bool(merchant_settings.get("night_time_check")),
+            start_time=merchant_settings.get("night_start_time") or "22:50",
+            end_time=merchant_settings.get("night_end_time") or "06:10",
+        )
+
+    @app.get("/api/captcha")
+    def api_captcha() -> Response:
+        svg = "<svg xmlns='http://www.w3.org/2000/svg' width='120' height='40'><rect width='120' height='40' fill='#f8fafc'/><text x='12' y='26' font-size='18' fill='#2563eb'>LOCAL</text></svg>"
+        resp = Response(svg, media_type="image/svg+xml")
+        resp.set_cookie("captcha", "LOCAL", samesite="lax")
+        return resp
 
     @app.get("/api/me")
     def api_me(customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
         return json_ok(customer=service.get_customer(customer["id"]))
+
+    @app.get("/api/balance")
+    def api_balance(customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
+        fresh = service.get_customer(customer["id"])
+        role = "night_card" if str(fresh.get("username") or "").startswith("night_") else "customer"
+        return json_ok(
+            user_id=fresh["id"],
+            username=fresh["username"],
+            role=role,
+            tenant_id=0,
+            balance_machine=int(fresh.get("balance_minutes") or 0),
+            balance_absolute=int(fresh.get("balance_minutes") or 0),
+            balance_machine_rounds=int(fresh.get("balance_rounds") or 0),
+            balance_absolute_rounds=int(fresh.get("balance_rounds") or 0),
+            balance_minutes=int(fresh.get("balance_minutes") or 0),
+            balance_rounds=int(fresh.get("balance_rounds") or 0),
+        )
 
     @app.get("/api/public/settings")
     def api_public_settings() -> dict[str, Any]:
@@ -313,15 +355,112 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     def api_capacity(_customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
         return json_ok(capacity=service.bridge.get_capacity())
 
+    @app.get("/api/devices/status")
+    def api_devices_status(customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
+        return json_ok(**_legacy_devices_status(service, customer))
+
+    @app.get("/api/enabled-equipment")
+    def api_enabled_equipment(_customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
+        cfg = service.get_equipment_config()
+        equipment = [e for e in (cfg.get("equipment") or []) if int(e.get("enabled") or 0) == 1]
+        return json_ok(
+            equipment=equipment,
+            supported_equipment=cfg.get("supported_equipment") or [],
+            max_loadout_cost=cfg.get("max_loadout_cost", 65),
+            allow_custom_loadout=cfg.get("allow_custom_loadout", True),
+        )
+
+    def legacy_place_order(request: Request, body: dict[str, Any], customer: dict[str, Any], *, auto: bool = False) -> dict[str, Any]:
+        fresh = service.get_customer(customer["id"])
+        mode = str(body.get("selected_mode") or body.get("mode") or "machine").strip().lower()
+        if mode not in {"machine", "absolute"}:
+            mode = "machine"
+        minutes = int(body.get("run_minutes") or body.get("minutes") or body.get("requested_minutes") or fresh.get("balance_minutes") or 0)
+        rounds = int(body.get("run_rounds") or body.get("rounds") or body.get("max_rounds") or fresh.get("balance_rounds") or 0)
+        quality = "secret" if mode == "absolute" else "standard"
+        team_code = body.get("boss_name") or body.get("team_code") or ""
+        result = service.place_order(
+            customer["id"],
+            requested_minutes=minutes,
+            requested_rounds=rounds,
+            team_code=team_code,
+            quality=quality,
+            idempotency_key=request.headers.get("X-Idempotency-Key"),
+        )
+        order = result.get("order") or {}
+        view = _legacy_order_view(order, service.get_settings())
+        return json_ok(
+            msg="订单创建成功",
+            order_id=view["id"],
+            run_minutes=view["run_minutes"],
+            run_rounds=view["run_rounds"],
+            max_rounds=view["max_rounds"],
+            mode=mode,
+            end_time=view.get("end_time"),
+            end_time_ms=view.get("end_time_ms"),
+            enhanced_radar_url=view.get("enhanced_radar_url", ""),
+            native_radar_url=view.get("native_radar_url", ""),
+            order=view,
+            reused=bool(result.get("reused")),
+        )
+
+    @app.post("/api/order")
+    def api_legacy_order(request: Request, body: dict[str, Any] = Body(...), customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
+        return legacy_place_order(request, body, customer, auto=False)
+
+    @app.post("/api/order/auto")
+    def api_legacy_order_auto(request: Request, body: dict[str, Any] = Body(...), customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
+        return legacy_place_order(request, body, customer, auto=True)
+
+    @app.get("/api/orders/mine")
+    def api_legacy_orders_mine(customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
+        settings_view = service.get_settings()
+        return json_ok(orders=[_legacy_order_view(o, settings_view) for o in service.order_history(customer["id"], limit=200)])
+
+    @app.post("/api/order/{order_id}/stop")
+    def api_legacy_order_stop(order_id: int, customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
+        stopped = service.customer_stop_order(order_id, customer["id"])
+        return json_ok(msg="已下发结束指令，等待设备确认", detail="", order=_legacy_order_view(stopped, service.get_settings()))
+
+    @app.post("/api/order/{order_id}/rejoin")
+    def api_legacy_order_rejoin(order_id: int, body: dict[str, Any] = Body(default_factory=dict), customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
+        order = service.customer_rejoin_order(order_id, customer["id"], body.get("boss_name") or body.get("team_code") or "")
+        return json_ok(msg="已下发换队", order=_legacy_order_view(order, service.get_settings()))
+
+    @app.post("/api/order/{order_id}/restart_backup")
+    def api_legacy_restart_backup(order_id: int, customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
+        service.assert_customer_order(order_id, customer["id"])
+        return json_ok(msg="备用电脑重启指令已记录")
+
+    @app.post("/api/order/{order_id}/switch_spectate")
+    def api_legacy_switch_spectate(order_id: int, customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
+        service.assert_customer_order(order_id, customer["id"])
+        return json_ok(msg="已切换观战")
+
+    @app.post("/api/order/{order_id}/switch-device")
+    def api_legacy_switch_device(order_id: int, body: dict[str, Any] = Body(default_factory=dict), customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
+        order = service.customer_rejoin_order(order_id, customer["id"], body.get("boss_name") or body.get("team_code") or "")
+        return json_ok(msg="已记录换机请求；中央 Bridge 会按当前会话保护策略继续执行", order=_legacy_order_view(order, service.get_settings()))
+
     @app.post("/api/recharge/redeem")
     def api_recharge(body: dict[str, Any] = Body(...), customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
         return json_ok(**service.redeem_card(customer["id"], body.get("code") or ""))
+
+    @app.post("/api/recharge")
+    def api_legacy_recharge(body: dict[str, Any] = Body(...), customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
+        result = service.redeem_card(customer["id"], body.get("card_code") or body.get("code") or "")
+        return json_ok(msg=f"兑换成功：{result.get('minutes', 0)} 分钟 / {result.get('rounds', 0)} 战损", **result)
+
+    @app.get("/api/recharge/orders")
+    def api_legacy_recharge_orders(customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
+        return json_ok(orders=service.recharge_history(customer["id"]))
 
     @app.post("/api/orders")
     def api_order(request: Request, body: dict[str, Any] = Body(...), customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
         result = service.place_order(
             customer["id"],
             requested_minutes=int(body.get("requested_minutes") or 0),
+            requested_rounds=int(body.get("requested_rounds") or body.get("rounds") or 0),
             team_code=body.get("team_code") or "",
             quality=body.get("quality") or "standard",
             idempotency_key=request.headers.get("X-Idempotency-Key"),
@@ -534,6 +673,221 @@ def _safe_notice_html(value: Any) -> str:
     html = re.sub(r"(?is)\s+on\w+\s*=\s*[^\s>]+", "", html)
     html = re.sub(r"(?i)javascript\s*:", "", html)
     return html
+
+
+_LEGACY_TEMPLATE_DIR = Path(__file__).with_name("legacy")
+_LEGACY_ACTIVE_STATUSES = {
+    "created",
+    "paid",
+    "claiming_device",
+    "device_claimed",
+    "commanding",
+    "waiting_ready_timer",
+    "running",
+    "stopping",
+    "refunding",
+}
+
+
+def _legacy_template(name: str) -> str:
+    return (_LEGACY_TEMPLATE_DIR / name).read_text(encoding="utf-8")
+
+
+def _legacy_system_name(settings: dict[str, Any]) -> str:
+    return _escape(settings.get("system_name") or "SNOW 自助下单")
+
+
+def _legacy_auth_html(name: str, settings: dict[str, Any]) -> str:
+    system_name = _legacy_system_name(settings)
+    html = _legacy_template(name)
+    html = html.replace("粥粥宇电竞", system_name).replace("瑶光电竞", system_name)
+    html = html.replace("const tenantId = 5782;", "const tenantId = 0;")
+    html = html.replace("const tenantId = 0;", "const tenantId = 0;")
+    return html
+
+
+def _legacy_customer_html(customer: dict[str, Any], settings: dict[str, Any]) -> str:
+    html = _legacy_auth_html("customer.html", settings)
+    html = html.replace("const CURRENT_USER_ID = 5827;", f"const CURRENT_USER_ID = {int(customer.get('id') or 0)};")
+    html = html.replace("const CURRENT_TENANT_ID = 0;", "const CURRENT_TENANT_ID = 0;")
+    hidden = (
+        f'<span id="serverEscapedUsername" style="display:none">{_escape(customer.get("username") or "")}</span>'
+        f'<span id="serverEscapedBalance" style="display:none">{int(customer.get("balance_minutes") or 0)}</span>'
+    )
+    return html.replace("</body>", hidden + "\n</body>")
+
+
+def _dt_to_epoch_ms(value: Any) -> int:
+    dt = parse_ts(str(value)) if value else None
+    return int(dt.timestamp() * 1000) if dt else 0
+
+
+def _legacy_order_mode(order: dict[str, Any]) -> str:
+    q = str(order.get("quality") or "").lower()
+    if q in {"absolute", "secret", "绝密"}:
+        return "absolute"
+    return "machine"
+
+
+def _legacy_order_status(status: Any) -> str:
+    s = str(status or "")
+    if s in _LEGACY_ACTIVE_STATUSES:
+        return "running"
+    if s in {"finished", "completed", "refunded"}:
+        return "completed"
+    return "failed"
+
+
+def _legacy_order_view(order: dict[str, Any] | None, settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    order = dict(order or {})
+    binding = order.get("binding") if isinstance(order.get("binding"), dict) else {}
+    device_id = int((binding or {}).get("device_id") or 0)
+    end_ms = _dt_to_epoch_ms(order.get("end_at"))
+    started = parse_ts(str(order.get("started_at"))) if order.get("started_at") else None
+    finished = parse_ts(str(order.get("finished_at"))) if order.get("finished_at") else None
+    requested_minutes = int(order.get("requested_minutes") or 0)
+    actual_minutes = requested_minutes
+    if started and finished:
+        actual_minutes = max(0, int((finished - started).total_seconds() // 60))
+    mode = _legacy_order_mode(order)
+    global_radar_url = str((settings or {}).get("global_radar_url") or "")
+    return {
+        "id": int(order.get("id") or 0),
+        "device_id": device_id,
+        "device_name": f"{device_id}号机" if device_id else "--",
+        "boss_name": order.get("team_code") or "",
+        "team_code": order.get("team_code") or "",
+        "mode": mode,
+        "status": _legacy_order_status(order.get("status")),
+        "raw_status": order.get("status") or "",
+        "run_minutes": requested_minutes,
+        "run_rounds": int(order.get("requested_rounds") or 0),
+        "max_rounds": int(order.get("requested_rounds") or 0),
+        "actual_minutes": actual_minutes,
+        "refund_minutes": int(order.get("refund_minutes") or 0),
+        "refund_rounds": int(order.get("refund_rounds") or 0),
+        "round_count": int(order.get("round_count") or 0),
+        "created_at": order.get("created_at") or "",
+        "started_at": order.get("started_at") or "",
+        "finished_at": order.get("finished_at") or "",
+        "end_time": int(end_ms / 1000) if end_ms else 0,
+        "end_time_ms": end_ms,
+        "remaining_seconds": int(order.get("remaining_seconds") or 0),
+        "remaining_minutes": int(order.get("remaining_minutes") or 0),
+        "enhanced_radar_url": global_radar_url,
+        "native_radar_url": "",
+        "device_work_status": "执行中",
+        "watchdog": None,
+    }
+
+
+def _legacy_devices_status(service: Any, customer: dict[str, Any]) -> dict[str, Any]:
+    settings = service.get_settings()
+    devices: list[dict[str, Any]] = []
+    used_ids: set[int] = set()
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+
+    try:
+        orders = service.admin_list_orders(limit=1000)
+    except TypeError:
+        orders = service.admin_list_orders()
+    for order in orders:
+        if str(order.get("status") or "") not in _LEGACY_ACTIVE_STATUSES:
+            continue
+        view = _legacy_order_view(order, settings)
+        did = int(view.get("device_id") or 0)
+        if did <= 0:
+            continue
+        used_ids.add(did)
+        status = "游戏中" if str(order.get("status")) == "running" else "执行中"
+        end_ms = int(view.get("end_time_ms") or 0)
+        devices.append({
+            "id": did,
+            "name": f"{did}号机",
+            "device_name": f"{did}号机",
+            "mode": view["mode"],
+            "mode_label": "绝密" if view["mode"] == "absolute" else "机密",
+            "enabled": True,
+            "work_status": status,
+            "running_order_id": int(order.get("id") or 0),
+            "running_user_id": int(order.get("customer_id") or 0),
+            "running_user": order.get("customer_username") or "",
+            "running_boss_name": order.get("team_code") or "",
+            "remaining_minutes": int(order.get("remaining_minutes") or 0),
+            "remaining_seconds": int(order.get("remaining_seconds") or 0),
+            "end_time": int(end_ms / 1000) if end_ms else 0,
+            "end_time_ms": end_ms,
+            "cooldown_until_ms": 0,
+            "harvard": "999W",
+            "hfb_value": 9990000,
+            "spectate_boss": order.get("team_code") or "",
+            "round_count": 0,
+            "run_rounds": int(order.get("requested_rounds") or 0),
+            "max_rounds": int(order.get("requested_rounds") or 0),
+            "radar_url": settings.get("global_radar_url") or "",
+            "online": True,
+            "state": "running",
+            "sub_state": "",
+            "work_status_detail": status,
+        })
+
+    idle_ids: list[int] = []
+    try:
+        cap = service.bridge.get_capacity()
+        raw_ids = cap.get("idle_device_ids") or cap.get("idle_devices") or cap.get("device_ids") or []
+        for item in raw_ids:
+            try:
+                idle_ids.append(int(item.get("id") if isinstance(item, dict) else item))
+            except Exception:
+                continue
+        if not idle_ids and cap.get("available"):
+            count = int(cap.get("idle_count") or cap.get("available_count") or cap.get("count") or 1)
+            idle_ids = list(range(1, max(1, min(count, 20)) + 1))
+    except Exception:
+        idle_ids = []
+
+    for did in idle_ids:
+        if did in used_ids:
+            continue
+        devices.append({
+            "id": did,
+            "name": f"{did}号机",
+            "device_name": f"{did}号机",
+            "mode": "hybrid",
+            "mode_label": "混合",
+            "enabled": True,
+            "work_status": "空闲",
+            "running_order_id": None,
+            "running_user_id": None,
+            "running_user": "",
+            "running_boss_name": "",
+            "remaining_minutes": 0,
+            "remaining_seconds": 0,
+            "end_time": 0,
+            "end_time_ms": 0,
+            "cooldown_until_ms": 0,
+            "harvard": "999W",
+            "hfb_value": 9990000,
+            "spectate_boss": "",
+            "round_count": 0,
+            "run_rounds": 0,
+            "max_rounds": 0,
+            "radar_url": settings.get("global_radar_url") or "",
+            "online": True,
+            "state": "idle",
+            "sub_state": "",
+            "work_status_detail": "空闲",
+        })
+
+    devices.sort(key=lambda d: (0 if d.get("running_user_id") == customer.get("id") else 1, 0 if d.get("work_status") == "空闲" else 1, int(d.get("id") or 0)))
+    return {
+        "devices": devices,
+        "privacy_mode": bool(settings.get("privacy_mode_enabled")),
+        "privacy_skip_balance": max(0, int(settings.get("privacy_skip_balance") or 0)),
+        "maintenance_mode": bool(settings.get("maintenance_mode_enabled")),
+        "maintenance_message": settings.get("maintenance_message") or "系统正在维护中，暂停接受新订单。请稍后再试。" if settings.get("maintenance_mode_enabled") else "",
+        "server_time_ms": now_ms,
+    }
 
 
 def _customer_dashboard_html(customer: dict[str, Any], current: dict[str, Any] | None, capacity: dict[str, Any], settings: dict[str, Any], banner: str) -> str:

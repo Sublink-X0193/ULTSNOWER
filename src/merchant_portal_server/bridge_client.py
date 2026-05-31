@@ -118,6 +118,18 @@ class BridgeClient:
         data = self.request("POST", f"/api/merchant/v1/control-sessions/{session_id}/commands", body=body, idem=idem)
         return data.get("command") or data
 
+    def queue_command(self, session_id: str, *, fencing_token: str, action: str, params: dict[str, Any] | None = None, expected_device_epoch: int | None = None, idem: str) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "fencing_token": fencing_token,
+            "action": action,
+            "params": params or {},
+            "command_ttl_seconds": 30,
+        }
+        if expected_device_epoch is not None:
+            body["expected_device_epoch"] = expected_device_epoch
+        data = self.request("POST", f"/api/merchant/v1/control-sessions/{session_id}/commands", body=body, idem=idem)
+        return data.get("command") or data
+
     def renew_session(self, session_id: str, *, fencing_token: str, idem: str, ttl_seconds: int = 180) -> dict[str, Any]:
         body = {"fencing_token": fencing_token, "technical_lease_ttl_seconds": ttl_seconds}
         return self.request("POST", f"/api/merchant/v1/control-sessions/{session_id}/renew", body=body, idem=idem)

@@ -25,6 +25,9 @@ snow-merchant-portal-server = "merchant_portal_server.__main__:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+merchant_portal_server = ["legacy/*.html"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]

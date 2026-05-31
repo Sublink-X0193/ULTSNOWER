@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <link rel="apple-touch-icon" href="/static/favicon.svg">
+    <title>注册 - 瑶光电竞</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+            background: #ffffff;
+            min-height: 100vh;
+            display: flex;
+            position: relative;
+        }
+
+        /* 左侧品牌区 */
+        .brand-section {
+            flex: 1;
+            background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            padding: 60px;
+            position: relative;
+            overflow: hidden;
+        }
+        .brand-section::before {
+            content: '';
+            position: absolute;
+            width: 500px;
+            height: 500px;
+            background: radial-gradient(circle, rgba(59,130,246,0.1) 0%, transparent 70%);
+            border-radius: 50%;
+            top: -200px;
+            left: -200px;
+            animation: float 6s ease-in-out infinite;
+        }
+        .brand-section::after {
+            content: '';
+            position: absolute;
+            width: 400px;
+            height: 400px;
+            background: radial-gradient(circle, rgba(139,92,246,0.08) 0%, transparent 70%);
+            border-radius: 50%;
+            bottom: -150px;
+            right: -150px;
+            animation: float 8s ease-in-out infinite reverse;
+        }
+        @keyframes float {
+            0%, 100% { transform: translate(0, 0); }
+            50% { transform: translate(30px, 30px); }
+        }
+        .brand-content {
+            position: relative;
+            z-index: 1;
+            text-align: center;
+        }
+        .brand-title {
+            font-size: 48px;
+            font-weight: 700;
+            color: #1f2937;
+            margin-bottom: 16px;
+            letter-spacing: -1px;
+        }
+        .brand-subtitle {
+            font-size: 18px;
+            color: #6b7280;
+            line-height: 1.6;
+        }
+
+        /* 右侧注册区 */
+        .register-section {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 60px;
+            background: #ffffff;
+        }
+        .register-card {
+            width: 100%;
+            max-width: 420px;
+            animation: slideIn 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+        @keyframes slideIn {
+            0% { opacity: 0; transform: translateX(30px); }
+            100% { opacity: 1; transform: translateX(0); }
+        }
+        .reg-logo {
+            margin-bottom: 32px;
+        }
+        .reg-logo .icon {
+            display: none;
+        }
+        .reg-logo h1 {
+            font-size: 28px;
+            color: #1f2937;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+        .reg-logo p {
+            font-size: 15px;
+            color: #6b7280;
+        }
+        .form-group {
+            margin-bottom: 18px;
+        }
+        .form-group label {
+            display: block;
+            font-size: 13px;
+            color: #374151;
+            margin-bottom: 8px;
+            font-weight: 500;
+        }
+        .form-group input {
+            width: 100%;
+            padding: 11px 14px;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            font-size: 14px;
+            outline: none;
+            transition: all 0.2s;
+            background: #fff;
+        }
+        .form-group input:focus {
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 3px rgba(59,130,246,0.1);
+        }
+        .captcha-row {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        .captcha-row input {
+            flex: 1;
+            padding: 11px 14px;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            font-size: 14px;
+            outline: none;
+            transition: all 0.2s;
+        }
+        .captcha-row input:focus {
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 3px rgba(59,130,246,0.1);
+        }
+        .captcha-img {
+            height: 42px;
+            border-radius: 6px;
+            border: 1px solid #e5e7eb;
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+        .captcha-img:hover {
+            border-color: #3b82f6;
+        }
+        .reg-btn {
+            width: 100%;
+            padding: 11px;
+            background: #3b82f6;
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            font-size: 15px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            margin-top: 8px;
+        }
+        .reg-btn:hover { background: #2563eb; }
+        .reg-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+        .msg {
+            text-align: center;
+            font-size: 13px;
+            margin-top: 12px;
+            min-height: 20px;
+        }
+        .msg.error { color: #ef4444; }
+        .msg.success { color: #22c55e; }
+        .footer-link {
+            text-align: center;
+            margin-top: 20px;
+            font-size: 14px;
+            color: #6b7280;
+        }
+        .footer-link a {
+            color: #3b82f6;
+            text-decoration: none;
+            font-weight: 500;
+        }
+        .footer-link a:hover { text-decoration: underline; }
+
+        /* 移动端适配 */
+        @media (max-width: 768px) {
+            body {
+                flex-direction: column;
+                -webkit-text-size-adjust: 100%;
+            }
+            .brand-section {
+                display: none;
+            }
+            .register-section {
+                padding: 20px;
+                min-height: 100vh;
+            }
+            .register-card {
+                max-width: 100%;
+            }
+            .reg-logo h1 {
+                font-size: 24px;
+            }
+            .reg-logo p {
+                font-size: 13px;
+            }
+            .form-group input {
+                font-size: 16px;
+                padding: 12px 14px;
+                min-height: 44px;
+            }
+            .reg-btn {
+                font-size: 16px;
+                padding: 13px;
+                min-height: 46px;
+            }
+            .captcha-row {
+                gap: 8px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- 左侧品牌区 -->
+    <div class="brand-section">
+        <div class="brand-content">
+            <h1 class="brand-title">瑶光电竞</h1>
+            <p class="brand-subtitle">高效便捷的自助服务平台<br>随时随地轻松下单</p>
+        </div>
+    </div>
+
+    <!-- 右侧注册区 -->
+    <div class="register-section">
+        <div class="register-card">
+        <div class="reg-logo">
+            <div class="icon">A</div>
+            <h1>瑶光电竞</h1>
+            <p>主系统 - 注册新账号</p>
+        </div>
+
+        <form id="regForm" onsubmit="doRegister(event)">
+            <div class="form-group">
+                <label>用户名</label>
+                <input type="text" id="username" placeholder="3-20位英文字母或数字" autocomplete="username" required />
+            </div>
+            <div class="form-group">
+                <label>密码</label>
+                <input type="password" id="password" placeholder="6-30位英文字母/数字/符号" autocomplete="new-password" required />
+            </div>
+            <div class="form-group">
+                <label>确认密码</label>
+                <input type="password" id="password2" placeholder="再次输入密码" autocomplete="new-password" required />
+            </div>
+            <div class="form-group">
+                <label>验证码</label>
+                <div class="captcha-row">
+                    <input type="text" id="captcha" placeholder="请输入验证码" maxlength="4" autocomplete="off" required />
+                    <img class="captcha-img" id="captchaImg" src="/api/captcha" title="点击刷新" onclick="refreshCaptcha()" />
+                </div>
+            </div>
+            <button type="submit" class="reg-btn" id="regBtn">注 册</button>
+        </form>
+        <div id="msg" class="msg"></div>
+        <div class="footer-link">
+            已有账号？<a href="#" onclick="goToLogin(); return false;">返回登录</a>
+        </div>
+        </div>
+    </div>
+
+    <script>
+        const tenantId = 0;
+
+        function refreshCaptcha() {
+            document.getElementById('captchaImg').src = '/api/captcha?' + Date.now();
+        }
+
+        async function doRegister(e) {
+            e.preventDefault();
+            const btn = document.getElementById('regBtn');
+            const msg = document.getElementById('msg');
+            const username = document.getElementById('username').value.trim();
+            const password = document.getElementById('password').value;
+            const password2 = document.getElementById('password2').value;
+            const captcha = document.getElementById('captcha').value.trim();
+
+            if (!username || !password || !password2 || !captcha) {
+                msg.className = 'msg error';
+                msg.textContent = '请填写所有字段';
+                return;
+            }
+
+            btn.disabled = true;
+            btn.textContent = '注册中...';
+            msg.textContent = '';
+
+            try {
+                const res = await fetch('/api/register', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password, password2, captcha, tenant_id: tenantId })
+                });
+                const data = await res.json();
+
+                if (data.ok) {
+                    msg.className = 'msg success';
+                    msg.textContent = '注册成功，正在跳转登录...';
+                    setTimeout(() => {
+                        if (tenantId && tenantId !== '0') {
+                            window.location.href = '/login?tenant=' + tenantId;
+                        } else {
+                            window.location.href = '/login';
+                        }
+                    }, 1200);
+                } else {
+                    msg.className = 'msg error';
+                    msg.textContent = data.msg || '注册失败';
+                    refreshCaptcha();
+                    document.getElementById('captcha').value = '';
+                    btn.disabled = false;
+                    btn.textContent = '注 册';
+                }
+            } catch (err) {
+                msg.className = 'msg error';
+                msg.textContent = '网络错误，请重试';
+                btn.disabled = false;
+                btn.textContent = '注 册';
+            }
+        }
+
+        // 跳转到登录页面（携带租户参数）
+        function goToLogin() {
+            if (tenantId && tenantId !== '0') {
+                window.location.href = '/login?tenant=' + tenantId;
+            } else {
+                window.location.href = '/login';
+            }
+        }
+    </script>
+</body>
+</html>

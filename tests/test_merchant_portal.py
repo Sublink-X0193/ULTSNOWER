@@ -480,6 +480,15 @@ def test_night_card_time_check_is_enforced_by_merchant_server(app_and_bridge):
     assert blocked.status_code == 403
     assert blocked.json()["error"] == "night_time_not_allowed"
 
+    saved = admin_client.post("/api/admin/settings", json={"night_time_check": "0"})
+    assert saved.status_code == 200, saved.text
+    app.state.service.add_recharge_card("NIGHT-LOGIN-OK", minutes=480, card_type="night")
+    night_client = TestClient(app)
+    logged = night_client.post("/api/night-login", json={"card_code": "NIGHT-LOGIN-OK"})
+    assert logged.status_code == 200, logged.text
+    assert logged.json()["role"] == "night_card"
+    assert night_client.get("/api/balance").json()["role"] == "night_card"
+
 
 def test_admin_equipment_config_roundtrip(app_and_bridge):
     app, _bridge = app_and_bridge
@@ -558,3 +567,56 @@ def test_admin_customer_and_order_management_surfaces(app_and_bridge):
     assert "所有客户预览 / 账户管理" in html
     assert "目前在线客户预览" in html
     assert "订单管理 / 剩余时长显示修改" in html
+
+
+def test_legacy_customer_login_portal_and_api_compatibility(app_and_bridge):
+    app, bridge = app_and_bridge
+    client = TestClient(app)
+
+    login_html = client.get("/login").text
+    assert "账号登录" in login_html
+    assert "包夜卡登录" in login_html
+    assert "/api/night-login" in login_html
+
+    register_html = client.get("/register").text
+    assert "验证码" in register_html
+    assert "/api/register" in register_html
+
+    registered = client.post("/api/register", json={"username": "legacy_user", "password": "123456"})
+    assert registered.status_code == 200, registered.text
+    customer_html = client.get("/customer").text
+    assert "设备列表" in customer_html
+    assert "我的订单" in customer_html
+    assert "卡密充值" in customer_html
+    assert "/api/devices/status" in customer_html
+    assert "/api/orders/mine" in customer_html
+
+    app.state.service.add_recharge_card("LEGACY-CARD", minutes=30, rounds=2)
+    recharge = client.post("/api/recharge", json={"card_code": "LEGACY-CARD"})
+    assert recharge.status_code == 200, recharge.text
+    assert recharge.json()["minutes"] == 30
+    balance = client.get("/api/balance").json()
+    assert balance["balance_machine"] == 30
+    assert balance["balance_machine_rounds"] == 2
+
+    devices = client.get("/api/devices/status").json()
+    assert devices["ok"] is True
+    assert devices["devices"]
+    assert devices["devices"][0]["work_status"] == "空闲"
+
+    order = client.post("/api/order", json={"boss_name": "ABC1234", "mode": "machine"})
+    assert order.status_code == 200, order.text
+    payload = order.json()
+    assert payload["run_minutes"] == 30
+    assert payload["run_rounds"] == 2
+    order_id = payload["order_id"]
+    mine = client.get("/api/orders/mine").json()["orders"]
+    assert any(o["id"] == order_id and o["boss_name"] == "ABC1234" and o["status"] == "running" for o in mine)
+
+    rejoin = client.post(f"/api/order/{order_id}/rejoin", json={"boss_name": "DEF1234"})
+    assert rejoin.status_code == 200, rejoin.text
+    assert rejoin.json()["order"]["boss_name"] == "DEF1234"
+
+    stopped = client.post(f"/api/order/{order_id}/stop")
+    assert stopped.status_code == 200, stopped.text
+    assert bridge.commands[-1]["action"] == "stop_current"
