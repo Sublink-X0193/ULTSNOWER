@@ -68,7 +68,7 @@ class BridgeClient:
     def get_capacity(self) -> dict[str, Any]:
         return self.request("GET", "/api/merchant/v1/capacity")
 
-    def create_control_session(self, *, merchant_context_ref: str, idem: str, device_id: int | None = None, auto_assign: bool = True, technical_lease_ttl_seconds: int = 180) -> dict[str, Any]:
+    def create_control_session(self, *, merchant_context_ref: str, idem: str, device_id: int | None = None, auto_assign: bool = True, technical_lease_ttl_seconds: int = 180, selection_policy: dict[str, Any] | None = None) -> dict[str, Any]:
         body: dict[str, Any] = {
             "auto_assign": auto_assign,
             "merchant_context_ref": merchant_context_ref,
@@ -77,6 +77,8 @@ class BridgeClient:
             "expected_device_state": "idle",
             "takeover_policy": "reject",
         }
+        if selection_policy:
+            body["selection_policy"] = selection_policy
         if device_id is not None:
             body["device_id"] = device_id
             body["auto_assign"] = False
@@ -91,12 +93,12 @@ class BridgeClient:
             "device_epoch": int(sess.get("device_epoch") or 0),
         }
 
-    def queue_command_bundle(self, session_id: str, *, fencing_token: str, expected_device_epoch: int | None, team_code: str, quality: str, idem: str) -> dict[str, Any]:
+    def queue_command_bundle(self, session_id: str, *, fencing_token: str, expected_device_epoch: int | None, team_code: str, quality: str, idem: str, ace_enabled: bool = False) -> dict[str, Any]:
         commands = [
             {"action": "set_loadout", "params": {"quality": quality, "loadout_id": f"default_{quality or 'standard'}"}},
             {"action": "enter_team", "params": {"team_code": team_code, "clear_existing": True}},
             {"action": "ready", "params": {}},
-            {"action": "watch", "params": {}},
+            {"action": "watch", "params": {"ace_enabled": bool(ace_enabled), "ace_window_seconds": 120}},
         ]
         body = {
             "fencing_token": fencing_token,

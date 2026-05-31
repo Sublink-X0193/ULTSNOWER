@@ -4,8 +4,9 @@ import math
 import secrets
 import sqlite3
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .bridge_client import BridgeClientError
 from .db import Database, dumps, iso, loads, parse_ts, utcnow
@@ -23,6 +24,7 @@ ACTIVE_ORDER_STATUSES = {
     "refunding",
 }
 RENEWABLE_STATUSES = {"claiming_device", "device_claimed", "commanding", "waiting_ready_timer", "running"}
+LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 DEFAULT_SETTINGS: dict[str, Any] = {
     "system_name": "SNOW 自助下单",
     "default_limit_rounds": 4,
@@ -591,6 +593,38 @@ class MerchantService:
             return "*" * len(s)
         return s[:2] + "***" + s[-2:]
 
+    def _bridge_selection_policy(self, settings: dict[str, Any], quality: str) -> dict[str, Any]:
+        skip_w = max(0, int(settings.get("privacy_skip_balance") or 0))
+        return {
+            "source": "merchant_settings",
+            "order_quality": str(quality or "standard"),
+            "privacy_mode": bool(settings.get("privacy_mode_enabled")),
+            "privacy_skip_balance_w": skip_w,
+            "min_device_coin_balance": skip_w * 10000,
+        }
+
+    @staticmethod
+    def _parse_hhmm(value: Any, default: str) -> time:
+        raw = str(value or default).strip()
+        try:
+            hh, mm = raw.split(":", 1)
+            return time(max(0, min(23, int(hh))), max(0, min(59, int(mm))))
+        except Exception:
+            hh, mm = default.split(":", 1)
+            return time(int(hh), int(mm))
+
+    def _night_time_allowed(self, settings: dict[str, Any], *, now_local: datetime | None = None) -> bool:
+        if not self._bool_value(settings.get("night_time_check")):
+            return True
+        current = (now_local or utcnow().astimezone(LOCAL_TZ)).time()
+        start = self._parse_hhmm(settings.get("night_start_time"), "22:50")
+        end = self._parse_hhmm(settings.get("night_end_time"), "06:10")
+        if start == end:
+            return True
+        if start < end:
+            return start <= current <= end
+        return current >= start or current <= end
+
     # ---------- equipment config ----------
     def supported_equipment_catalog(self) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -761,6 +795,13 @@ class MerchantService:
                     raise MerchantError("card_not_found", "卡密不存在", 404)
                 if card["status"] != "unused":
                     raise MerchantError("card_used", "卡密已使用", 409)
+                settings = self._settings_locked(con)
+                if str(card["card_type"] or "normal") == "night" and not self._night_time_allowed(settings):
+                    raise MerchantError(
+                        "night_time_not_allowed",
+                        f"包夜卡只能在 {settings.get('night_start_time') or '22:50'} 至次日 {settings.get('night_end_time') or '06:10'} 使用",
+                        403,
+                    )
                 minutes = int(card["minutes"] or 0)
                 rounds = int(card["rounds"] or 0)
                 con.execute("UPDATE recharge_cards SET status='used',used_by_customer_id=?,used_at=? WHERE code_hash=?", (customer_id, now_s, code_hash))
@@ -834,8 +875,9 @@ class MerchantService:
                 raise
 
         merchant_context_ref = opaque_merchant_ref(order_no, self.merchant_ref_secret)
+        selection_policy = self._bridge_selection_policy(settings, quality)
         try:
-            sess = self.bridge.create_control_session(merchant_context_ref=merchant_context_ref, idem=f"claim:{order_no}")
+            sess = self.bridge.create_control_session(merchant_context_ref=merchant_context_ref, idem=f"claim:{order_no}", selection_policy=selection_policy)
             with self.db.connect() as con:
                 con.execute("BEGIN IMMEDIATE")
                 con.execute("UPDATE local_orders SET status='device_claimed',updated_at=? WHERE id=?", (iso(), order_id))
@@ -852,6 +894,7 @@ class MerchantService:
                 team_code=team_code,
                 quality=quality,
                 idem=f"bundle:start:{order_no}:v1",
+                ace_enabled=bool(settings.get("ace_enabled")),
             )
             commands = bundle.get("commands") or []
             last_command_id = commands[-1].get("command_id") if commands else None

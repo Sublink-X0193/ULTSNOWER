@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from zoneinfo import ZoneInfo
 from typing import Any
 
 import pytest
@@ -19,6 +20,7 @@ class FakeBridge:
         self.lock = threading.Lock()
         self.idle = list(range(1, capacity + 1))
         self.sessions: dict[str, dict[str, Any]] = {}
+        self.session_requests: list[dict[str, Any]] = []
         self.events_log: list[dict[str, Any]] = []
         self.commands: list[dict[str, Any]] = []
         self.renew_calls: list[str] = []
@@ -45,8 +47,16 @@ class FakeBridge:
             n = len(self.idle)
             return {"ok": True, "available": bool(n), "capacity_label": "many" if n >= 3 else ("few" if n else "full"), "idle_device_ids": list(self.idle)}
 
-    def create_control_session(self, *, merchant_context_ref: str, idem: str, device_id: int | None = None, auto_assign: bool = True, technical_lease_ttl_seconds: int = 180) -> dict[str, Any]:
+    def create_control_session(self, *, merchant_context_ref: str, idem: str, device_id: int | None = None, auto_assign: bool = True, technical_lease_ttl_seconds: int = 180, selection_policy: dict[str, Any] | None = None) -> dict[str, Any]:
         with self.lock:
+            self.session_requests.append({
+                "merchant_context_ref": merchant_context_ref,
+                "idem": idem,
+                "device_id": device_id,
+                "auto_assign": auto_assign,
+                "technical_lease_ttl_seconds": technical_lease_ttl_seconds,
+                "selection_policy": dict(selection_policy or {}),
+            })
             if not self.idle:
                 raise BridgeClientError("device_not_available", "没有可用设备", 409)
             did = self.idle.pop(0)
@@ -56,14 +66,15 @@ class FakeBridge:
             self._event("control_session.created", sid, device_id=did, device_epoch=1, payload={"purpose": "customer_control"})
             return dict(sess)
 
-    def queue_command_bundle(self, session_id: str, *, fencing_token: str, expected_device_epoch: int | None, team_code: str, quality: str, idem: str) -> dict[str, Any]:
+    def queue_command_bundle(self, session_id: str, *, fencing_token: str, expected_device_epoch: int | None, team_code: str, quality: str, idem: str, ace_enabled: bool = False) -> dict[str, Any]:
         with self.lock:
             if session_id not in self.sessions:
                 raise BridgeClientError("not_found", "session missing", 404)
             bundle_id = f"bundle_{session_id}"
             out = []
             for action in ["set_loadout", "enter_team", "ready", "watch"]:
-                cmd = {"command_id": f"cmd_{len(self.commands)+1}", "control_session_id": session_id, "action": action, "status": "queued", "bundle_id": bundle_id}
+                params = {"ace_enabled": bool(ace_enabled), "ace_window_seconds": 120} if action == "watch" else {}
+                cmd = {"command_id": f"cmd_{len(self.commands)+1}", "control_session_id": session_id, "action": action, "params": params, "status": "queued", "bundle_id": bundle_id}
                 self.commands.append(cmd)
                 out.append(dict(cmd))
             return {"bundle_id": bundle_id, "commands": out}
@@ -417,6 +428,57 @@ def test_admin_settings_legacy_ui_and_post_compatibility(app_and_bridge):
     notice = client.post("/api/admin/notice", json={"content": "<b>公告</b>"})
     assert notice.status_code == 200
     assert client.get("/api/notice").json()["content"] == "<b>公告</b>"
+
+
+def test_customer_usage_settings_are_merchant_owned_and_applied(app_and_bridge):
+    app, bridge = app_and_bridge
+    admin_client = TestClient(app)
+    assert admin_client.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+    saved = admin_client.post(
+        "/api/admin/settings",
+        json={
+            "privacy_mode": "1",
+            "privacy_skip_balance": "8",
+            "ace_enabled": "1",
+        },
+    )
+    assert saved.status_code == 200, saved.text
+
+    user_client = TestClient(app)
+    register_and_login(user_client, "policy_user")
+    app.state.service.add_recharge_card("POLICY-60", minutes=60)
+    assert user_client.post("/api/recharge/redeem", json={"code": "POLICY-60"}).status_code == 200
+    order = user_client.post("/api/orders", json={"requested_minutes": 10, "team_code": "POLICY", "quality": "secret"}).json()["order"]
+    assert order["status"] == "waiting_ready_timer"
+
+    policy = bridge.session_requests[-1]["selection_policy"]
+    assert policy["source"] == "merchant_settings"
+    assert policy["privacy_mode"] is True
+    assert policy["privacy_skip_balance_w"] == 8
+    assert policy["min_device_coin_balance"] == 80000
+    assert policy["order_quality"] == "secret"
+    assert any(cmd["action"] == "watch" and cmd["params"]["ace_enabled"] is True for cmd in bridge.commands)
+
+
+def test_night_card_time_check_is_enforced_by_merchant_server(app_and_bridge):
+    app, _bridge = app_and_bridge
+    admin_client = TestClient(app)
+    assert admin_client.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+    local_now = utcnow().astimezone(ZoneInfo("Asia/Shanghai"))
+    start = (local_now + timedelta(hours=2)).strftime("%H:%M")
+    end = (local_now + timedelta(hours=3)).strftime("%H:%M")
+    saved = admin_client.post(
+        "/api/admin/settings",
+        json={"night_time_check": "1", "night_start_time": start, "night_end_time": end},
+    )
+    assert saved.status_code == 200, saved.text
+
+    user_client = TestClient(app)
+    register_and_login(user_client, "night_user")
+    app.state.service.add_recharge_card("NIGHT-BLOCK", minutes=480, card_type="night")
+    blocked = user_client.post("/api/recharge/redeem", json={"code": "NIGHT-BLOCK"})
+    assert blocked.status_code == 403
+    assert blocked.json()["error"] == "night_time_not_allowed"
 
 
 def test_admin_equipment_config_roundtrip(app_and_bridge):

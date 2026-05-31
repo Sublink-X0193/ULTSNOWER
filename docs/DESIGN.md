@@ -92,6 +92,9 @@ MERCHANT_ADMIN_PASSWORD=admin123456
 支持配置：
 
 - `privacy_mode_enabled`：隐私模式。客户侧订单响应会隐藏队伍码、移除 `fencing_token` 和 `merchant_context_ref`，并可遮罩 control session id。
+- `privacy_skip_balance`：商户下单策略。配置在商户后台；创建 control session 时转换为 `selection_policy.min_device_coin_balance` 给中央执行设备筛选。中央不配置该值，也不能看到客户余额。
+- `ace_enabled`：商户订单策略。配置在商户后台；下单 command bundle 的 `watch` 参数携带该开关，由 Agent/事件流辅助判定。中央控制台不配置该值。
+- `night_time_check` / `night_start_time` / `night_end_time`：商户包夜卡使用规则。由商户服务器在包夜卡充值/使用时本地校验，不传中央。
 - `maintenance_mode_enabled`：维护模式。已存在订单可继续展示/处理，新下单会返回 `maintenance_mode`。
 - `announcement_enabled` / `announcement_text`：公告开关和内容。客户首页展示，`GET /api/public/settings` 返回给前端。
 
