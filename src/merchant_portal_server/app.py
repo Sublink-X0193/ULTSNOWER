@@ -55,6 +55,10 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     app.state.service = service
     app.state.worker_task = None
 
+    @app.get("/favicon.ico", include_in_schema=False)
+    def favicon() -> Response:
+        return Response(status_code=204)
+
     @app.exception_handler(MerchantError)
     async def merchant_error_handler(_request: Request, exc: MerchantError) -> JSONResponse:
         return json_fail(exc.code, exc.message, exc.status_code)
@@ -458,6 +462,8 @@ def _customer_dashboard_html(customer: dict[str, Any], current: dict[str, Any] |
     .badge-ok { background:#dcfce7; color:#15803d; } .badge-warn { background:#fef3c7; color:#92400e; } .badge-info { background:#dbeafe; color:#1d4ed8; } .badge-gray { background:#f3f4f6; color:#6b7280; }
     .empty { padding:26px; text-align:center; color:#9ca3af; background:#fff; border:1px dashed #d1d5db; border-radius:14px; }
     .notice { margin-bottom:16px; }
+    .toast { position:fixed; right:22px; top:74px; z-index:80; min-width:240px; max-width:420px; padding:12px 14px; border-radius:12px; background:#111827; color:#fff; box-shadow:0 18px 38px rgba(15,23,42,.28); opacity:0; transform:translateY(-10px); pointer-events:none; transition:all .22s; font-size:13px; font-weight:700; }
+    .toast.show { opacity:1; transform:translateY(0); }
     @media(max-width:900px){ .hero-row,.form-grid,.cards{grid-template-columns:1fr}.topbar{height:auto;padding:12px;align-items:flex-start;gap:10px}.topbar-right{flex-direction:column;align-items:flex-end}.content{padding:14px}.orders-table{display:block;overflow:auto} }
   </style>
 </head>
@@ -515,6 +521,7 @@ def _customer_dashboard_html(customer: dict[str, Any], current: dict[str, Any] |
     </div>
     <div id="tab-history" class="tab-panel"><div id="historyBox"></div></div>
   </div>
+  <div id="toast" class="toast"></div>
 <script>
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -525,6 +532,13 @@ async function api(path, opts={}) {
   const data = await res.json().catch(()=>({ok:false,error:'bad_json',message:'响应解析失败'}));
   if (!res.ok || data.ok === false) throw new Error(data.message || data.error || res.statusText);
   return data;
+}
+function toast(msg){
+  const el=$('toast');
+  el.textContent=msg;
+  el.classList.add('show');
+  clearTimeout(window.__toastTimer);
+  window.__toastTimer=setTimeout(()=>el.classList.remove('show'),2600);
 }
 function fmtMin(m){m=Number(m||0);return m>=60?`${Math.floor(m/60)}时${m%60}分`:`${m}分`}
 function remain(o){ if(!o||!o.end_at)return 0; return Math.max(0, Math.ceil((new Date(o.end_at)-new Date())/60000)); }
@@ -549,11 +563,11 @@ async function placeOrder(){
   try {
     const body={requested_minutes:Number($('orderMinutes').value||0),team_code:$('teamCode').value,quality:$('quality').value};
     await api('/api/orders',{method:'POST',headers:{'X-Idempotency-Key':'web-'+Date.now()},body:JSON.stringify(body)});
-    alert('下单已创建，等待设备 ready 后开始计时'); showTab('current'); await loadAll();
-  } catch(e){ alert(e.message); }
+    toast('下单已创建，等待设备 ready 后开始计时'); showTab('current'); await loadAll();
+  } catch(e){ toast(e.message); }
 }
 async function redeem(){
-  try { await api('/api/recharge/redeem',{method:'POST',body:JSON.stringify({code:$('rechargeCode').value})}); alert('充值成功，刷新页面查看余额'); location.reload(); } catch(e){ alert(e.message); }
+  try { await api('/api/recharge/redeem',{method:'POST',body:JSON.stringify({code:$('rechargeCode').value})}); toast('充值成功，刷新页面查看余额'); setTimeout(()=>location.reload(),700); } catch(e){ toast(e.message); }
 }
 async function loadAll(){ await loadCurrent(); await loadHistory(); }
 loadAll().catch(()=>{});
@@ -625,6 +639,22 @@ def _admin_dashboard_html(admin: dict[str, Any]) -> str:
     .settings-row:last-child { border-bottom:0; }
     textarea { width:100%; min-height:120px; border:1px solid #d1d5db; border-radius:10px; padding:12px; font:inherit; resize:vertical; }
     .switch-line { display:flex; align-items:center; gap:8px; font-weight:600; }
+    .modal-mask { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: none; align-items: center; justify-content: center; z-index: 1000; padding: 18px; }
+    .modal-mask.show { display: flex; }
+    .modal { width: min(560px, 96vw); max-height: 90vh; overflow: hidden; background: #fff; border-radius: 14px; box-shadow: 0 24px 80px rgba(15,23,42,.28); animation: modalIn .16s ease-out; }
+    .modal.modal-wide { width: min(960px, 96vw); }
+    @keyframes modalIn { from { transform: translateY(8px) scale(.98); opacity: 0 } to { transform: none; opacity: 1 } }
+    .modal-head { padding: 16px 18px; border-bottom: 1px solid #e5e7eb; font-weight: 800; font-size: 16px; }
+    .modal-body { padding: 16px 18px; max-height: 68vh; overflow: auto; }
+    .modal-foot { padding: 12px 18px; border-top: 1px solid #e5e7eb; display: flex; justify-content: flex-end; gap: 8px; background: #f9fafb; }
+    .field { margin-bottom: 12px; }
+    .field label { display: block; font-size: 12px; color: #6b7280; margin-bottom: 6px; font-weight: 700; }
+    .field input, .field select, .field textarea { width: 100%; height: 38px; border: 1px solid #d1d5db; border-radius: 8px; padding: 0 10px; font: inherit; background: #fff; }
+    .field textarea { height: 120px; padding: 10px; }
+    .field-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .info-box { padding: 10px 12px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; color: #1d4ed8; font-size: 13px; line-height: 1.6; }
+    .toast { position: fixed; right: 24px; bottom: 24px; background: #111827; color: #fff; padding: 10px 14px; border-radius: 9px; box-shadow: 0 12px 30px rgba(0,0,0,.22); z-index: 1200; opacity: 0; transform: translateY(8px); transition: all .18s; }
+    .toast.show { opacity: 1; transform: none; }
     @media (max-width: 980px) { .stats-grid { grid-template-columns: repeat(2, minmax(0,1fr)); } .content{padding:14px} .data-table{display:block;overflow:auto} .settings-row{grid-template-columns:1fr} }
   </style>
 </head>
@@ -699,6 +729,98 @@ def _admin_dashboard_html(admin: dict[str, Any]) -> str:
       </div>
     </div>
   </div>
+
+  <div id="toast" class="toast"></div>
+
+  <div id="addUserModal" class="modal-mask">
+    <div class="modal">
+      <div class="modal-head">创建客户</div>
+      <div class="modal-body">
+        <div class="field"><label>用户名</label><input id="newUsername" placeholder="客户登录用户名"></div>
+        <div class="field"><label>密码</label><input id="newPassword" value="123456" placeholder="客户登录密码"></div>
+        <div class="field-row">
+          <div class="field"><label>初始分钟</label><input id="newBalanceMinutes" type="number" min="0" value="0"></div>
+          <div class="field"><label>初始局数</label><input id="newBalanceRounds" type="number" min="0" value="0"></div>
+        </div>
+      </div>
+      <div class="modal-foot"><button class="btn-sm btn-gray" onclick="closeModal('addUserModal')">取消</button><button class="btn-sm btn-primary" onclick="submitCreateCustomer()">创建</button></div>
+    </div>
+  </div>
+
+  <div id="changePwdModal" class="modal-mask">
+    <div class="modal">
+      <div class="modal-head">修改客户密码</div>
+      <div class="modal-body">
+        <input id="changePwdUserId" type="hidden">
+        <div class="field"><label>用户名</label><input id="changePwdUsername" disabled style="background:#f9fafb"></div>
+        <div class="field"><label>新密码</label><input id="changePwdNew" value="123456" placeholder="输入新密码"></div>
+      </div>
+      <div class="modal-foot"><button class="btn-sm btn-gray" onclick="closeModal('changePwdModal')">取消</button><button class="btn-sm btn-primary" onclick="submitResetPwd()">确认修改</button></div>
+    </div>
+  </div>
+
+  <div id="changeBalanceModal" class="modal-mask">
+    <div class="modal">
+      <div class="modal-head">修改客户剩余时长</div>
+      <div class="modal-body">
+        <input id="changeBalUserId" type="hidden">
+        <div class="info-box" id="changeBalInfo">--</div>
+        <div class="field-row" style="margin-top:12px">
+          <div class="field"><label>分钟余额</label><input id="changeBalanceMinutes" type="number" min="0" value="0"></div>
+          <div class="field"><label>局数余额</label><input id="changeBalanceRounds" type="number" min="0" value="0"></div>
+        </div>
+        <div class="hint">直接填写调整后的余额。负数增减请在订单管理里用“加减时”。</div>
+      </div>
+      <div class="modal-foot"><button class="btn-sm btn-gray" onclick="closeModal('changeBalanceModal')">取消</button><button class="btn-sm btn-green" onclick="submitBalance()">保存</button></div>
+    </div>
+  </div>
+
+  <div id="addTimeModal" class="modal-mask">
+    <div class="modal">
+      <div class="modal-head">订单加减时</div>
+      <div class="modal-body">
+        <input id="addTimeOrderId" type="hidden">
+        <div class="info-box" id="addTimeInfo">--</div>
+        <div class="field" style="margin-top:12px">
+          <label>操作类型</label>
+          <div style="display:flex;gap:16px;align-items:center">
+            <label style="display:flex;gap:6px;align-items:center"><input type="radio" name="addTimeOp" value="add" checked> 加时</label>
+            <label style="display:flex;gap:6px;align-items:center"><input type="radio" name="addTimeOp" value="sub"> 减时</label>
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="field"><label>小时</label><input id="addTimeHours" type="number" min="0" max="24" value="0"></div>
+          <div class="field"><label>分钟</label><input id="addTimeMinutes" type="number" min="0" max="59" value="30"></div>
+        </div>
+        <div class="hint">会直接修改商户本地订单的购买时长/结束时间；中央设备只接收最终 stop。</div>
+      </div>
+      <div class="modal-foot"><button class="btn-sm btn-gray" onclick="closeModal('addTimeModal')">取消</button><button class="btn-sm btn-green" onclick="submitAdjustOrder()">确认调整</button></div>
+    </div>
+  </div>
+
+  <div id="userOrdersModal" class="modal-mask">
+    <div class="modal modal-wide">
+      <div class="modal-head" id="userOrdersTitle">客户历史订单</div>
+      <div class="modal-body" id="userOrdersContent"></div>
+      <div class="modal-foot"><button class="btn-sm btn-gray" onclick="closeModal('userOrdersModal')">关闭</button></div>
+    </div>
+  </div>
+
+  <div id="orderDetailModal" class="modal-mask">
+    <div class="modal modal-wide">
+      <div class="modal-head">订单详情</div>
+      <div class="modal-body" id="orderDetailContent"></div>
+      <div class="modal-foot"><button class="btn-sm btn-gray" onclick="closeModal('orderDetailModal')">关闭</button></div>
+    </div>
+  </div>
+
+  <div id="confirmModal" class="modal-mask">
+    <div class="modal">
+      <div class="modal-head" id="confirmTitle">确认操作</div>
+      <div class="modal-body"><div id="confirmText" class="info-box"></div></div>
+      <div class="modal-foot"><button class="btn-sm btn-gray" onclick="resolveConfirm(false)">取消</button><button class="btn-sm btn-danger" id="confirmOkBtn" onclick="resolveConfirm(true)">确认</button></div>
+    </div>
+  </div>
 <script>
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -710,6 +832,30 @@ async function api(path, opts={}) {
   if (!res.ok || data.ok === false) throw new Error(data.message || data.error || res.statusText);
   return data;
 }
+function openModal(id) { $(id).classList.add('show'); }
+function closeModal(id) { $(id).classList.remove('show'); }
+function toast(msg) {
+  const el = $('toast'); el.textContent = msg; el.classList.add('show');
+  clearTimeout(window.__toastTimer); window.__toastTimer = setTimeout(() => el.classList.remove('show'), 2200);
+}
+let __confirmResolver = null;
+function appConfirm(title, text, okClass='btn-danger') {
+  $('confirmTitle').textContent = title || '确认操作';
+  $('confirmText').innerHTML = esc(text || '').replace(/\n/g, '<br>');
+  $('confirmOkBtn').className = 'btn-sm ' + okClass;
+  openModal('confirmModal');
+  return new Promise(resolve => { __confirmResolver = resolve; });
+}
+function resolveConfirm(v) {
+  closeModal('confirmModal');
+  if (__confirmResolver) __confirmResolver(v);
+  __confirmResolver = null;
+}
+document.querySelectorAll('.modal-mask').forEach(m => m.addEventListener('click', e => {
+  if (e.target !== m) return;
+  if (m.id === 'confirmModal') resolveConfirm(false);
+  else m.classList.remove('show');
+}));
 function statusBadge(status) {
   const cls = status === 'running' ? 'badge-running' : (status === 'waiting_ready_timer' || status === 'stopping' ? 'badge-waiting' : (status === 'finished' ? 'badge-done' : (String(status).includes('failed') || String(status).includes('interrupted') ? 'badge-failed' : 'badge-offline')));
   return `<span class="badge ${cls}">${esc(status || '-')}</span>`;
@@ -754,45 +900,87 @@ function renderCustomers(rows, target) {
     <td>${c.active_order ? `${statusBadge(c.active_order.status)} 剩 ${fmtMin(c.active_order.remaining_minutes)}` : '-'}</td>
     <td>${fmtDate(c.last_seen_at)}</td>
     <td>
-      <button class="btn-sm btn-green" onclick="editBalance(${c.id}, ${c.balance_minutes}, ${c.balance_rounds})">调时长</button>
-      <button class="btn-sm btn-gray" onclick="resetPwd(${c.id})">改密码</button>
+      <button class="btn-sm btn-green" onclick="editBalance(${c.id}, ${c.balance_minutes}, ${c.balance_rounds}, decodeURIComponent('${encodeURIComponent(c.username)}'))">调时长</button>
+      <button class="btn-sm btn-gray" onclick="resetPwd(${c.id}, decodeURIComponent('${encodeURIComponent(c.username)}'))">改密码</button>
       <button class="btn-sm btn-amber" onclick="setCustomerStatus(${c.id}, '${c.status === 'active' ? 'frozen' : 'active'}')">${c.status === 'active' ? '冻结' : '解冻'}</button>
-      <button class="btn-sm btn-purple" onclick="showCustomerOrders(${c.id}, '${esc(c.username)}')">历史</button>
+      <button class="btn-sm btn-purple" onclick="showCustomerOrders(${c.id}, decodeURIComponent('${encodeURIComponent(c.username)}'))">历史</button>
+      <button class="btn-sm btn-danger" onclick="deleteCustomer(${c.id}, decodeURIComponent('${encodeURIComponent(c.username)}'))">删除</button>
     </td></tr>`).join('') + '</tbody></table>';
 }
-async function createCustomer() {
-  const username = prompt('客户用户名'); if (!username) return;
-  const password = prompt('客户密码', '123456') || '123456';
-  const balance_minutes = Number(prompt('初始分钟', '0') || 0);
-  await api('/api/admin/customers', {method:'POST', body:JSON.stringify({username,password,balance_minutes})});
-  await loadCustomers();
+function createCustomer() {
+  $('newUsername').value = '';
+  $('newPassword').value = '123456';
+  $('newBalanceMinutes').value = '0';
+  $('newBalanceRounds').value = '0';
+  openModal('addUserModal');
 }
-async function editBalance(id, oldMinutes, oldRounds) {
-  const mode = prompt('输入新的分钟余额；或输入 +30 / -15 做增减', String(oldMinutes));
-  if (mode === null) return;
-  const body = {};
-  if (/^[+-]/.test(mode.trim())) body.delta_minutes = Number(mode);
-  else body.balance_minutes = Number(mode);
-  const rounds = prompt('新的局数余额（留空不改）', String(oldRounds ?? 0));
-  if (rounds !== null && rounds !== '') body.balance_rounds = Number(rounds);
-  await api(`/api/admin/customers/${id}/balance`, {method:'PUT', body:JSON.stringify(body)});
-  await loadCustomers(); await loadOnline();
+async function submitCreateCustomer() {
+  const username = $('newUsername').value.trim();
+  const password = $('newPassword').value.trim() || '123456';
+  const balance_minutes = Number($('newBalanceMinutes').value || 0);
+  const balance_rounds = Number($('newBalanceRounds').value || 0);
+  if (!username) { toast('请填写用户名'); return; }
+  try {
+    await api('/api/admin/customers', {method:'POST', body:JSON.stringify({username,password,balance_minutes,balance_rounds})});
+    closeModal('addUserModal'); toast('客户创建成功'); await loadCustomers(); await loadOverview();
+  } catch(e) { toast(e.message); }
 }
-async function resetPwd(id) {
-  const password = prompt('新密码', '123456'); if (!password) return;
-  await api(`/api/admin/customers/${id}/password`, {method:'PUT', body:JSON.stringify({password})});
-  alert('密码已修改');
+function editBalance(id, oldMinutes, oldRounds, username='') {
+  $('changeBalUserId').value = id;
+  $('changeBalInfo').textContent = `客户：${username || id}`;
+  $('changeBalanceMinutes').value = oldMinutes || 0;
+  $('changeBalanceRounds').value = oldRounds || 0;
+  openModal('changeBalanceModal');
+}
+async function submitBalance() {
+  const id = $('changeBalUserId').value;
+  const body = {
+    balance_minutes: Number($('changeBalanceMinutes').value || 0),
+    balance_rounds: Number($('changeBalanceRounds').value || 0),
+  };
+  try {
+    await api(`/api/admin/customers/${id}/balance`, {method:'PUT', body:JSON.stringify(body)});
+    closeModal('changeBalanceModal'); toast('客户余额已更新'); await loadCustomers(); await loadOnline(); await loadOverview();
+  } catch(e) { toast(e.message); }
+}
+function resetPwd(id, username='') {
+  $('changePwdUserId').value = id;
+  $('changePwdUsername').value = username || id;
+  $('changePwdNew').value = '123456';
+  openModal('changePwdModal');
+}
+async function submitResetPwd() {
+  const id = $('changePwdUserId').value;
+  const password = $('changePwdNew').value.trim();
+  if (!password) { toast('请输入新密码'); return; }
+  try {
+    await api(`/api/admin/customers/${id}/password`, {method:'PUT', body:JSON.stringify({password})});
+    closeModal('changePwdModal'); toast('密码已修改');
+  } catch(e) { toast(e.message); }
 }
 async function setCustomerStatus(id, status) {
-  if (!confirm(status === 'frozen' ? '确认冻结该客户？' : '确认解冻该客户？')) return;
-  await api(`/api/admin/customers/${id}/status`, {method:'PUT', body:JSON.stringify({status})});
-  await loadCustomers(); await loadOnline();
+  const ok = await appConfirm(status === 'frozen' ? '冻结客户' : '解冻客户', status === 'frozen' ? '确认冻结该客户？冻结后会清理客户在线 session。' : '确认解冻该客户？', status === 'frozen' ? 'btn-amber' : 'btn-primary');
+  if (!ok) return;
+  try {
+    await api(`/api/admin/customers/${id}/status`, {method:'PUT', body:JSON.stringify({status})});
+    toast('客户状态已更新'); await loadCustomers(); await loadOnline(); await loadOverview();
+  } catch(e) { toast(e.message); }
 }
 async function showCustomerOrders(id, name) {
-  showTab('orders');
-  const d = await api('/api/admin/orders?customer_id=' + id);
-  renderOrders(d.orders);
-  $('orderKeyword').value = name;
+  try {
+    const d = await api('/api/admin/orders?customer_id=' + id);
+    $('userOrdersTitle').textContent = `客户历史订单 · ${name || id}`;
+    renderOrders(d.orders, 'userOrdersContent');
+    openModal('userOrdersModal');
+  } catch(e) { toast(e.message); }
+}
+async function deleteCustomer(id, name='') {
+  const ok = await appConfirm('删除客户', `确定删除客户「${name || id}」？\n有进行中订单时会被后端拒绝。`, 'btn-danger');
+  if (!ok) return;
+  try {
+    await api(`/api/admin/customers/${id}`, {method:'DELETE'});
+    toast('客户已删除'); await loadCustomers(); await loadOnline(); await loadOverview();
+  } catch(e) { toast(e.message); }
 }
 async function loadOrders() {
   const q = $('orderKeyword')?.value || '';
@@ -815,19 +1003,47 @@ function renderOrders(rows, target='ordersTable') {
     </td></tr>`).join('') + '</tbody></table>';
 }
 async function adjustOrder(id) {
-  const add = Number(prompt('调整订单剩余时长（分钟，可填负数）', '30') || 0);
-  if (!add) return;
-  await api(`/api/admin/orders/${id}/add-time`, {method:'POST', body:JSON.stringify({add_minutes:add})});
-  await loadOrders(); await loadOverview();
+  try {
+    const d = await api('/api/admin/orders/' + id);
+    $('addTimeOrderId').value = id;
+    $('addTimeInfo').innerHTML = `订单 #${d.order.id} · 客户 ${esc(d.order.customer_username || d.order.customer_id)} · 当前剩余 ${fmtMin(d.order.remaining_minutes)} · 购买 ${fmtMin(d.order.requested_minutes)}`;
+    document.querySelector('input[name="addTimeOp"][value="add"]').checked = true;
+    $('addTimeHours').value = 0;
+    $('addTimeMinutes').value = 30;
+    openModal('addTimeModal');
+  } catch(e) { toast(e.message); }
+}
+async function submitAdjustOrder() {
+  const id = $('addTimeOrderId').value;
+  const sign = document.querySelector('input[name="addTimeOp"]:checked')?.value === 'sub' ? -1 : 1;
+  const minutes = (Number($('addTimeHours').value || 0) * 60 + Number($('addTimeMinutes').value || 0)) * sign;
+  if (!minutes) { toast('请填写调整时长'); return; }
+  try {
+    await api(`/api/admin/orders/${id}/add-time`, {method:'POST', body:JSON.stringify({add_minutes:minutes})});
+    closeModal('addTimeModal'); toast('订单时长已调整'); await loadOrders(); await loadOverview();
+  } catch(e) { toast(e.message); }
 }
 async function stopOrder(id) {
-  if (!confirm('确认向中央下发 stop_current 并停止该订单？')) return;
-  await api(`/api/admin/orders/${id}/stop`, {method:'POST', body:'{}'});
-  await loadOrders();
+  const ok = await appConfirm('停止订单', '确认向中央下发 stop_current 并停止该订单？\n本地订单会进入 stopping，等待中央事件确认。', 'btn-danger');
+  if (!ok) return;
+  try {
+    await api(`/api/admin/orders/${id}/stop`, {method:'POST', body:'{}'});
+    toast('已下发停止命令'); await loadOrders(); await loadOverview();
+  } catch(e) { toast(e.message); }
 }
 async function orderDetail(id) {
   const d = await api('/api/admin/orders/' + id);
-  alert(JSON.stringify(d.order, null, 2));
+  const o = d.order;
+  $('orderDetailContent').innerHTML = `<table class="data-table"><tbody>
+    <tr><th>ID</th><td>${o.id}</td><th>客户</th><td>${esc(o.customer_username || o.customer_id)}</td></tr>
+    <tr><th>状态</th><td>${statusBadge(o.status)}</td><th>队伍码</th><td>${esc(o.team_code || '-')}</td></tr>
+    <tr><th>购买</th><td>${fmtMin(o.requested_minutes)}</td><th>剩余</th><td>${fmtMin(o.remaining_minutes)}</td></tr>
+    <tr><th>开始</th><td>${fmtDate(o.started_at)}</td><th>结束</th><td>${fmtDate(o.end_at)}</td></tr>
+    <tr><th>设备</th><td>${esc(o.binding?.device_id || '-')}</td><th>Session</th><td style="font-family:monospace">${esc(o.control_session_id || '-')}</td></tr>
+    <tr><th>本地订单号</th><td colspan="3" style="font-family:monospace">${esc(o.local_order_no)}</td></tr>
+    <tr><th>失败原因</th><td colspan="3">${esc(o.fail_reason || '-')}</td></tr>
+  </tbody></table>`;
+  openModal('orderDetailModal');
 }
 async function loadSettings() {
   const d = await api('/api/admin/settings');
@@ -844,7 +1060,7 @@ async function saveSettings() {
     announcement_enabled: $('announcementEnabled').checked,
     announcement_text: $('announcementText').value
   })});
-  alert('保存成功');
+  toast('保存成功');
   await loadOverview();
 }
 async function loadAll() {
@@ -853,7 +1069,7 @@ async function loadAll() {
   renderCustomers(online.customers.slice(0, 6), 'overviewOnline');
   renderOrders(orders.orders.filter(o => ['claiming_device','device_claimed','commanding','waiting_ready_timer','running','stopping'].includes(o.status)).slice(0, 6), 'overviewOrders');
 }
-loadAll().then(loadSettings).catch(e => alert(e.message));
+loadAll().then(loadSettings).catch(e => toast(e.message));
 </script>
 </body>
 </html>"""
