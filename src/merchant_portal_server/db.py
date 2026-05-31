@@ -60,7 +60,21 @@ class Database:
     def init(self) -> None:
         with self.connect() as con:
             con.executescript(SCHEMA_SQL)
+            self._migrate(con)
             con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def _migrate(self, con: sqlite3.Connection) -> None:
+        cols = {r["name"] for r in con.execute("PRAGMA table_info(recharge_cards)").fetchall()}
+        migrations = {
+            "code_plain": "ALTER TABLE recharge_cards ADD COLUMN code_plain TEXT",
+            "card_type": "ALTER TABLE recharge_cards ADD COLUMN card_type TEXT NOT NULL DEFAULT 'normal'",
+            "mode": "ALTER TABLE recharge_cards ADD COLUMN mode TEXT NOT NULL DEFAULT 'machine'",
+            "night_coin_loss": "ALTER TABLE recharge_cards ADD COLUMN night_coin_loss INTEGER NOT NULL DEFAULT 0",
+            "note": "ALTER TABLE recharge_cards ADD COLUMN note TEXT",
+        }
+        for col, sql in migrations.items():
+            if col not in cols:
+                con.execute(sql)
 
 
 SCHEMA_SQL = """
@@ -175,8 +189,13 @@ CREATE INDEX IF NOT EXISTS idx_bridge_events_session ON bridge_events(control_se
 
 CREATE TABLE IF NOT EXISTS recharge_cards (
   code_hash TEXT PRIMARY KEY,
+  code_plain TEXT,
   minutes INTEGER NOT NULL DEFAULT 0,
   rounds INTEGER NOT NULL DEFAULT 0,
+  card_type TEXT NOT NULL DEFAULT 'normal',
+  mode TEXT NOT NULL DEFAULT 'machine',
+  night_coin_loss INTEGER NOT NULL DEFAULT 0,
+  note TEXT,
   status TEXT NOT NULL DEFAULT 'unused',
   used_by_customer_id INTEGER,
   used_at TEXT,

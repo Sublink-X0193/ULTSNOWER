@@ -292,6 +292,14 @@ def test_admin_settings_privacy_announcement_and_maintenance(app_and_bridge):
         "/api/admin/settings",
         json={
             "system_name": "SNOW 商户自助",
+            "default_limit_rounds": 5,
+            "absolute_rounds_per_hour": 3,
+            "night_time_check": True,
+            "night_start_time": "22:50",
+            "night_end_time": "06:10",
+            "global_radar_url": "https://example.local/radar",
+            "privacy_skip_balance": 12,
+            "ace_enabled": True,
             "privacy_mode_enabled": True,
             "maintenance_mode_enabled": False,
             "announcement_enabled": True,
@@ -303,6 +311,15 @@ def test_admin_settings_privacy_announcement_and_maintenance(app_and_bridge):
     assert public_settings["system_name"] == "SNOW 商户自助"
     assert public_settings["privacy_mode_enabled"] is True
     assert public_settings["announcement_text"] == "今晚 22:00 维护"
+    assert public_settings["global_radar_url"] == "https://example.local/radar"
+    assert public_settings["night_start_time"] == "22:50"
+    admin_settings = client.get("/api/admin/settings").json()["settings"]
+    assert admin_settings["default_limit_rounds"] == 5
+    assert admin_settings["absolute_rounds_per_hour"] == 3
+    assert admin_settings["night_time_check"] is True
+    assert admin_settings["global_radar_url"] == "https://example.local/radar"
+    assert admin_settings["privacy_skip_balance"] == 12
+    assert admin_settings["ace_enabled"] is True
 
     register_and_login(client, "privacy_user")
     app.state.service.add_recharge_card("PRIV-10", minutes=10)
@@ -331,6 +348,54 @@ def test_admin_settings_privacy_announcement_and_maintenance(app_and_bridge):
     assert blocked.status_code == 503
     assert blocked.json()["error"] == "maintenance_mode"
     assert blocked.json()["message"] == "系统升级中，预计 22:00 恢复"
+
+
+def test_admin_card_generation_listing_export_and_delete(app_and_bridge):
+    app, _bridge = app_and_bridge
+    client = TestClient(app)
+    assert client.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+    client.put("/api/admin/settings", json={"default_limit_rounds": 4, "absolute_rounds_per_hour": 3})
+
+    gen = client.post("/api/admin/cards/generate", json={"mode": "absolute", "minutes": 120, "count": 2, "card_type": "normal"})
+    assert gen.status_code == 200, gen.text
+    cards = gen.json()["cards"]
+    assert len(cards) == 2
+    assert cards[0]["rounds"] == 6
+
+    listed = client.get("/api/admin/cards?status=unused").json()["cards"]
+    assert any(c["card_code"] == cards[0]["card_code"] for c in listed)
+
+    export = client.get("/api/admin/cards/export-unused")
+    assert export.status_code == 200
+    assert cards[0]["card_code"] in export.text
+
+    deleted = client.delete(f"/api/admin/cards/{cards[0]['card_code']}")
+    assert deleted.status_code == 200, deleted.text
+    listed_after = client.get("/api/admin/cards?status=unused").json()["cards"]
+    assert not any(c["card_code"] == cards[0]["card_code"] for c in listed_after)
+
+
+def test_admin_equipment_config_roundtrip(app_and_bridge):
+    app, _bridge = app_and_bridge
+    client = TestClient(app)
+    assert client.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+
+    cfg = client.get("/api/admin/equipment-config")
+    assert cfg.status_code == 200
+    payload = cfg.json()
+    equipment = payload["equipment"]
+    assert any(e["equipment_name"] == "五级夜视头" for e in equipment)
+    first = dict(equipment[0])
+    first["price"] = 12
+    first["enabled"] = 1
+
+    saved = client.post("/api/admin/equipment-config", json={"equipment": [first], "max_loadout_cost": 80, "allow_custom_loadout": False})
+    assert saved.status_code == 200, saved.text
+
+    cfg2 = client.get("/api/admin/equipment-config").json()
+    assert cfg2["max_loadout_cost"] == 80
+    assert cfg2["allow_custom_loadout"] is False
+    assert any(e["equipment_name"] == first["equipment_name"] and e["price"] == 12 and e["enabled"] == 1 for e in cfg2["equipment"])
 
 
 def test_html_pages_escape_user_controlled_values(app_and_bridge):

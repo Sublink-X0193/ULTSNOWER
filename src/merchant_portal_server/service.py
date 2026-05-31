@@ -25,11 +25,37 @@ ACTIVE_ORDER_STATUSES = {
 RENEWABLE_STATUSES = {"claiming_device", "device_claimed", "commanding", "waiting_ready_timer", "running"}
 DEFAULT_SETTINGS: dict[str, Any] = {
     "system_name": "SNOW 自助下单",
+    "default_limit_rounds": 4,
+    "absolute_rounds_per_hour": 3,
+    "night_time_check": True,
+    "night_start_time": "22:50",
+    "night_end_time": "06:10",
+    "global_radar_url": "",
     "privacy_mode_enabled": False,
+    "privacy_skip_balance": 0,
+    "ace_enabled": False,
     "maintenance_mode_enabled": False,
     "maintenance_message": "",
     "announcement_enabled": False,
     "announcement_text": "",
+    "max_loadout_cost": 65,
+    "allow_custom_loadout": True,
+    "equipment_config": [],
+}
+
+V9_LOADOUT_CATALOG: dict[str, tuple[str, ...]] = {
+    "helmet": ("五级夜视头", "五级听力头", "五级耐力头", "五级防爆头", "四级听力头"),
+    "armor": ("五级重甲", "五级老赛甲", "四级重甲"),
+    "rig": ("20格胸挂",),
+    "pistol": ("满改左轮",),
+    "backpack": ("30格金包",),
+}
+V9_LOADOUT_TYPE_LABELS = {
+    "helmet": "头部装备",
+    "armor": "护甲装备",
+    "rig": "胸挂装备",
+    "pistol": "手枪装备",
+    "backpack": "背包装备",
 }
 
 
@@ -446,25 +472,28 @@ class MerchantService:
         out = dict(DEFAULT_SETTINGS)
         for r in rows:
             out[str(r["key"])] = loads(r["value_json"], out.get(str(r["key"])))
-        out["privacy_mode_enabled"] = bool(out.get("privacy_mode_enabled"))
-        out["maintenance_mode_enabled"] = bool(out.get("maintenance_mode_enabled"))
-        out["maintenance_message"] = str(out.get("maintenance_message") or "")
-        out["announcement_enabled"] = bool(out.get("announcement_enabled"))
-        out["announcement_text"] = str(out.get("announcement_text") or "")
-        out["system_name"] = str(out.get("system_name") or "SNOW 自助下单")
-        return out
+        return self._normalize_settings(out)
 
     def _settings_locked(self, con: sqlite3.Connection) -> dict[str, Any]:
         rows = con.execute("SELECT key,value_json FROM merchant_settings").fetchall()
         out = dict(DEFAULT_SETTINGS)
         for r in rows:
             out[str(r["key"])] = loads(r["value_json"], out.get(str(r["key"])))
-        out["privacy_mode_enabled"] = bool(out.get("privacy_mode_enabled"))
-        out["maintenance_mode_enabled"] = bool(out.get("maintenance_mode_enabled"))
-        out["maintenance_message"] = str(out.get("maintenance_message") or "")
-        out["announcement_enabled"] = bool(out.get("announcement_enabled"))
-        out["announcement_text"] = str(out.get("announcement_text") or "")
-        out["system_name"] = str(out.get("system_name") or "SNOW 自助下单")
+        return self._normalize_settings(out)
+
+    def _normalize_settings(self, out: dict[str, Any]) -> dict[str, Any]:
+        for key in ("privacy_mode_enabled", "maintenance_mode_enabled", "announcement_enabled", "night_time_check", "ace_enabled", "allow_custom_loadout"):
+            out[key] = bool(out.get(key))
+        for key, default in (("default_limit_rounds", 4), ("absolute_rounds_per_hour", 3), ("privacy_skip_balance", 0), ("max_loadout_cost", 65)):
+            try:
+                out[key] = max(0, int(out.get(key, default)))
+            except Exception:
+                out[key] = default
+        for key in ("maintenance_message", "announcement_text", "system_name", "night_start_time", "night_end_time", "global_radar_url"):
+            out[key] = str(out.get(key) or DEFAULT_SETTINGS.get(key) or "")
+        out["system_name"] = out["system_name"] or "SNOW 自助下单"
+        if not isinstance(out.get("equipment_config"), list):
+            out["equipment_config"] = []
         return out
 
     def update_settings(self, admin_id: int, values: dict[str, Any]) -> dict[str, Any]:
@@ -473,23 +502,32 @@ class MerchantService:
         for key in allowed:
             if key not in values:
                 continue
-            if key.endswith("_enabled"):
+            if key.endswith("_enabled") or key in {"night_time_check", "ace_enabled", "allow_custom_loadout"}:
                 sanitized[key] = bool(values.get(key))
+            elif key in {"default_limit_rounds", "absolute_rounds_per_hour", "privacy_skip_balance", "max_loadout_cost"}:
+                try:
+                    sanitized[key] = max(0, int(values.get(key) or 0))
+                except Exception:
+                    raise MerchantError("bad_setting", f"{key} 必须是数字")
             elif key == "announcement_text":
                 text = str(values.get(key) or "").strip()
                 if len(text) > 4000:
                     raise MerchantError("bad_announcement", "公告最多 4000 字")
                 sanitized[key] = text
-            elif key == "maintenance_message":
+            elif key in {"maintenance_message", "global_radar_url", "night_start_time", "night_end_time"}:
                 text = str(values.get(key) or "").strip()
-                if len(text) > 200:
-                    raise MerchantError("bad_maintenance_message", "维护文案最多 200 字")
+                if len(text) > 300:
+                    raise MerchantError("bad_setting", f"{key} 最多 300 字")
                 sanitized[key] = text
             elif key == "system_name":
                 text = str(values.get(key) or "").strip()
                 if len(text) > 32:
                     raise MerchantError("bad_system_name", "系统名称最多 32 字")
                 sanitized[key] = text or "SNOW 自助下单"
+            elif key == "equipment_config":
+                if not isinstance(values.get(key), list):
+                    raise MerchantError("bad_equipment", "装备配置必须是数组")
+                sanitized[key] = self._normalize_equipment_list(values.get(key) or [])
         now_s = iso()
         with self.db.connect() as con:
             con.execute("BEGIN IMMEDIATE")
@@ -539,15 +577,161 @@ class MerchantService:
             return "*" * len(s)
         return s[:2] + "***" + s[-2:]
 
+    # ---------- equipment config ----------
+    def supported_equipment_catalog(self) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        idx = 1
+        for typ, names in V9_LOADOUT_CATALOG.items():
+            for sort_order, name in enumerate(names, 1):
+                out.append({
+                    "id": idx,
+                    "equipment_type": typ,
+                    "equipment_name": name,
+                    "type_label": V9_LOADOUT_TYPE_LABELS.get(typ, typ),
+                    "price": 0,
+                    "enabled": 0,
+                    "sort_order": sort_order,
+                    "client_supported": True,
+                })
+                idx += 1
+        return out
+
+    def _normalize_equipment_list(self, rows: list[Any]) -> list[dict[str, Any]]:
+        valid_names = {(typ, name) for typ, names in V9_LOADOUT_CATALOG.items() for name in names}
+        out: list[dict[str, Any]] = []
+        for i, item in enumerate(rows, 1):
+            if not isinstance(item, dict):
+                continue
+            typ = str(item.get("equipment_type") or "").strip()
+            name = str(item.get("equipment_name") or "").strip()
+            if (typ, name) not in valid_names:
+                continue
+            out.append({
+                "id": int(item.get("id") or i),
+                "equipment_type": typ,
+                "equipment_name": name,
+                "type_label": V9_LOADOUT_TYPE_LABELS.get(typ, typ),
+                "price": max(0, int(item.get("price") or 0)),
+                "enabled": 1 if bool(item.get("enabled")) else 0,
+                "sort_order": int(item.get("sort_order") or i),
+                "client_supported": True,
+            })
+        return out
+
+    def get_equipment_config(self) -> dict[str, Any]:
+        st = self.get_settings()
+        configured = self._normalize_equipment_list(st.get("equipment_config") or [])
+        by_key = {(x["equipment_type"], x["equipment_name"]): x for x in configured}
+        merged: list[dict[str, Any]] = []
+        for base in self.supported_equipment_catalog():
+            merged.append({**base, **by_key.get((base["equipment_type"], base["equipment_name"]), {})})
+        return {
+            "equipment": merged,
+            "supported_equipment": self.supported_equipment_catalog(),
+            "max_loadout_cost": int(st.get("max_loadout_cost") or 65),
+            "allow_custom_loadout": bool(st.get("allow_custom_loadout")),
+        }
+
+    def update_equipment_config(self, admin_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.update_settings(admin_id, {
+            "equipment_config": payload.get("equipment") or [],
+            "max_loadout_cost": payload.get("max_loadout_cost", 65),
+            "allow_custom_loadout": bool(payload.get("allow_custom_loadout", True)),
+        })
+
     # ---------- recharge ----------
-    def add_recharge_card(self, code: str, *, minutes: int = 0, rounds: int = 0) -> None:
+    def add_recharge_card(self, code: str, *, minutes: int = 0, rounds: int = 0, card_type: str = "normal", mode: str = "machine", night_coin_loss: int = 0) -> None:
         if minutes <= 0 and rounds <= 0:
             raise MerchantError("bad_card", "卡密分钟或局数必须大于 0")
         with self.db.connect() as con:
             con.execute(
-                "INSERT OR REPLACE INTO recharge_cards(code_hash,minutes,rounds,status,created_at) VALUES(?,?,?,?,?)",
-                (hash_card_code(code), int(minutes), int(rounds), "unused", iso()),
+                """INSERT OR REPLACE INTO recharge_cards(code_hash,code_plain,minutes,rounds,card_type,mode,night_coin_loss,status,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                (hash_card_code(code), code, int(minutes), int(rounds), card_type or "normal", mode or "machine", int(night_coin_loss or 0), "unused", iso()),
             )
+
+    def _calc_rounds(self, minutes: int, mode: str, card_type: str, explicit_rounds: int = 0) -> int:
+        if explicit_rounds > 0:
+            return int(explicit_rounds)
+        if str(card_type or "normal") == "night":
+            return 0
+        st = self.get_settings()
+        per_hour = int(st.get("default_limit_rounds") if mode == "machine" else st.get("absolute_rounds_per_hour") or 0)
+        if minutes <= 0 or per_hour <= 0:
+            return 0
+        return max(per_hour, math.floor((minutes / 60) * per_hour))
+
+    def generate_recharge_cards(self, *, count: int, minutes: int, rounds: int = 0, card_type: str = "normal", mode: str = "machine", night_coin_loss: int = 0) -> list[dict[str, Any]]:
+        count = max(1, min(int(count or 1), 100))
+        minutes = int(minutes or 0)
+        if minutes <= 0:
+            raise MerchantError("bad_card", "请填写时长")
+        mode = mode if mode in {"machine", "absolute", "hybrid"} else "machine"
+        card_type = "night" if card_type == "night" else "normal"
+        rounds = self._calc_rounds(minutes, mode, card_type, int(rounds or 0))
+        made = []
+        for _ in range(count):
+            code = "LOCAL-" + secrets.token_hex(4).upper()
+            self.add_recharge_card(code, minutes=minutes, rounds=rounds, card_type=card_type, mode=mode, night_coin_loss=night_coin_loss)
+            made.append({"card_code": code, "minutes": minutes, "rounds": rounds, "card_type": card_type, "mode": mode, "night_coin_loss": int(night_coin_loss or 0)})
+        return made
+
+    def list_recharge_cards(self, *, keyword: str = "", status: str = "", card_type: str = "", limit: int = 500) -> list[dict[str, Any]]:
+        keyword_l = str(keyword or "").strip().lower()
+        with self.db.connect() as con:
+            rows = con.execute(
+                """SELECT rc.*, c.username AS used_by_name
+                   FROM recharge_cards rc LEFT JOIN customers c ON c.id=rc.used_by_customer_id
+                   ORDER BY rc.created_at DESC LIMIT ?""",
+                (max(1, min(int(limit or 500), 2000)),),
+            ).fetchall()
+        out = []
+        for r in rows:
+            item = {
+                "card_code": r["code_plain"] or self._mask(r["code_hash"]),
+                "minutes": int(r["minutes"] or 0),
+                "rounds": int(r["rounds"] or 0),
+                "absolute_rounds": int(r["rounds"] or 0),
+                "card_type": r["card_type"] or "normal",
+                "mode": r["mode"] or "machine",
+                "night_coin_loss": int(r["night_coin_loss"] or 0),
+                "used": r["status"] != "unused",
+                "status": r["status"],
+                "used_by_name": r["used_by_name"],
+                "used_at": r["used_at"],
+                "created_at": r["created_at"],
+            }
+            if status and status != ("used" if item["used"] else "unused"):
+                continue
+            if card_type and item["card_type"] != card_type:
+                continue
+            if keyword_l and keyword_l not in dumps(item).lower():
+                continue
+            out.append(item)
+        return out
+
+    def delete_recharge_card(self, code: str) -> dict[str, Any]:
+        code_hash = hash_card_code(code)
+        with self.db.connect() as con:
+            row = con.execute("SELECT * FROM recharge_cards WHERE code_hash=?", (code_hash,)).fetchone()
+            if not row:
+                raise MerchantError("card_not_found", "卡密不存在", 404)
+            if row["status"] != "unused":
+                raise MerchantError("card_used", "已使用卡密不能删除", 409)
+            con.execute("DELETE FROM recharge_cards WHERE code_hash=?", (code_hash,))
+        return {"deleted": True, "card_code": code}
+
+    def export_unused_cards_csv(self, *, card_type: str = "") -> str:
+        import csv
+        import io
+
+        rows = self.list_recharge_cards(status="unused", card_type=card_type, limit=2000)
+        out = io.StringIO()
+        w = csv.writer(out)
+        w.writerow(["card_code", "card_type", "mode", "minutes", "rounds", "created_at"])
+        for c in rows:
+            w.writerow([c["card_code"], c["card_type"], c["mode"], c["minutes"], c["rounds"], c["created_at"]])
+        return out.getvalue()
 
     def redeem_card(self, customer_id: int, code: str) -> dict[str, Any]:
         code_hash = hash_card_code(code)

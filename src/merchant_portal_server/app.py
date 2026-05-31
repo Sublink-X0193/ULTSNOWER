@@ -115,6 +115,9 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         banner = ""
         if merchant_settings.get("announcement_enabled") and merchant_settings.get("announcement_text"):
             banner += f"<div style='background:#eef6ff;border:1px solid #9ec5fe;padding:10px;border-radius:8px'>公告：{_safe_notice_html(merchant_settings.get('announcement_text'))}</div>"
+        if merchant_settings.get("global_radar_url"):
+            url = _escape(merchant_settings.get("global_radar_url"))
+            banner += f"<div style='background:#f8fafc;border:1px solid #cbd5e1;padding:10px;border-radius:8px;margin-top:8px'>全局备注地址：<span style='font-family:Consolas,monospace'>{url}</span></div>"
         if merchant_settings.get("maintenance_mode_enabled"):
             msg = _escape(merchant_settings.get("maintenance_message") or "暂时不能新下单。")
             banner += f"<div style='background:#fff3cd;border:1px solid #ffda6a;padding:10px;border-radius:8px;margin-top:8px'>维护模式已开启：{msg}</div>"
@@ -256,6 +259,12 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         merchant_settings = service.get_settings()
         return json_ok(settings={
             "system_name": merchant_settings["system_name"],
+            "default_limit_rounds": merchant_settings["default_limit_rounds"],
+            "absolute_rounds_per_hour": merchant_settings["absolute_rounds_per_hour"],
+            "night_time_check": merchant_settings["night_time_check"],
+            "night_start_time": merchant_settings["night_start_time"],
+            "night_end_time": merchant_settings["night_end_time"],
+            "global_radar_url": merchant_settings["global_radar_url"],
             "privacy_mode_enabled": merchant_settings["privacy_mode_enabled"],
             "maintenance_mode_enabled": merchant_settings["maintenance_mode_enabled"],
             "maintenance_message": merchant_settings["maintenance_message"] if merchant_settings["maintenance_mode_enabled"] else "",
@@ -311,6 +320,52 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     @app.put("/api/admin/settings")
     def api_admin_put_settings(body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
         return json_ok(settings=service.update_settings(admin["id"], body))
+
+    @app.post("/api/admin/settings")
+    def api_admin_post_settings(body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        payload = body.get("settings") if isinstance(body.get("settings"), dict) else body
+        return json_ok(settings=service.update_settings(admin["id"], payload))
+
+    @app.get("/api/admin/equipment-config")
+    def api_admin_equipment_config(_admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        return json_ok(**service.get_equipment_config())
+
+    @app.post("/api/admin/equipment-config")
+    def api_admin_equipment_config_save(body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        service.update_equipment_config(admin["id"], body)
+        return json_ok(msg="保存成功", **service.get_equipment_config())
+
+    @app.get("/api/admin/cards")
+    def api_admin_cards(keyword: str = "", status: str = "", type: str = "", _admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:  # noqa: A002 - keep legacy query name
+        cards = service.list_recharge_cards(keyword=keyword, status=status, card_type=type)
+        return json_ok(cards=cards, total=len(cards))
+
+    @app.post("/api/admin/cards/generate")
+    def api_admin_cards_generate(body: dict[str, Any] = Body(...), _admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        minutes = int(body.get("minutes") or 0)
+        if minutes <= 0:
+            minutes = int(body.get("hours") or 0) * 60 + int(body.get("days") or 0) * 24 * 60
+        cards = service.generate_recharge_cards(
+            count=int(body.get("count") or 1),
+            minutes=minutes,
+            rounds=int(body.get("rounds") or body.get("absolute_rounds") or 0),
+            card_type=body.get("card_type") or "normal",
+            mode=body.get("mode") or "machine",
+            night_coin_loss=int(body.get("night_coin_loss") or 0),
+        )
+        return json_ok(msg="生成成功", cards=cards)
+
+    @app.delete("/api/admin/cards/{code}")
+    def api_admin_card_delete(code: str, _admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        return json_ok(**service.delete_recharge_card(code))
+
+    @app.get("/api/admin/cards/export-unused")
+    def api_admin_cards_export_unused(type: str = "", _admin: dict[str, Any] = Depends(current_admin)) -> Response:  # noqa: A002 - keep legacy query name
+        return Response(
+            service.export_unused_cards_csv(card_type=type),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": "attachment; filename=unused_cards_local.csv"},
+        )
 
     @app.get("/api/admin/overview")
     def api_admin_overview(_admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
@@ -654,6 +709,11 @@ def _admin_dashboard_html(admin: dict[str, Any]) -> str:
     .badge-waiting { background:#fef3c7; color:#92400e; }
     .badge-failed { background:#fee2e2; color:#b91c1c; }
     .badge-done { background:#ede9fe; color:#6d28d9; }
+    .badge-unused { background:#dcfce7; color:#166534; }
+    .badge-used { background:#f3f4f6; color:#6b7280; }
+    .badge-machine { background:#dbeafe; color:#1d4ed8; }
+    .badge-absolute { background:#fef3c7; color:#92400e; }
+    .badge-purple { background:#ede9fe; color:#6d28d9; }
     .empty-state { padding:32px; text-align:center; color:#9ca3af; background:#fff; border:1px dashed #d1d5db; border-radius:12px; }
     .hint { color:#6b7280; font-size:12px; line-height:1.7; }
     .settings-row { display:grid; grid-template-columns: 220px 1fr; gap:12px; padding:14px 0; border-bottom:1px solid #f3f4f6; align-items:flex-start; }
@@ -676,6 +736,10 @@ def _admin_dashboard_html(admin: dict[str, Any]) -> str:
     .maintenance-box { border:1px solid #fde68a; background:#fffbeb; padding:10px 12px; border-radius:8px; }
     .maintenance-box label { color:#b45309; font-weight:700; }
     .readonly-note { padding:10px 12px; border-radius:8px; background:#f8fafc; border:1px dashed #cbd5e1; color:#64748b; font-size:12px; line-height:1.7; }
+    .mini-grid { display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap:12px; }
+    .card-list { display:flex; flex-direction:column; gap:6px; max-height:220px; overflow:auto; margin-top:8px; padding:8px; border:1px solid #e5e7eb; border-radius:8px; background:#f9fafb; }
+    .card-item { display:flex; justify-content:space-between; gap:8px; align-items:center; padding:7px 9px; border:1px solid #e5e7eb; border-radius:7px; background:#fff; font-family:Consolas, "SFMono-Regular", monospace; }
+    .config-input { width:86px; height:30px; border:1px solid #d1d5db; border-radius:7px; padding:0 8px; }
     .modal-mask { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: none; align-items: center; justify-content: center; z-index: 1000; padding: 18px; }
     .modal-mask.show { display: flex; }
     .modal { width: min(560px, 96vw); max-height: 90vh; overflow: hidden; background: #fff; border-radius: 14px; box-shadow: 0 24px 80px rgba(15,23,42,.28); animation: modalIn .16s ease-out; }
@@ -708,6 +772,8 @@ def _admin_dashboard_html(admin: dict[str, Any]) -> str:
     <div class="nav-tab active" data-tab="overview">今日总览</div>
     <div class="nav-tab" data-tab="online">在线客户</div>
     <div class="nav-tab" data-tab="customers">客户管理</div>
+    <div class="nav-tab" data-tab="cards">充值卡</div>
+    <div class="nav-tab" data-tab="equipment">装备配置</div>
     <div class="nav-tab" data-tab="orders">订单管理</div>
     <div class="nav-tab" data-tab="settings">系统设置</div>
   </div>
@@ -734,6 +800,42 @@ def _admin_dashboard_html(admin: dict[str, Any]) -> str:
         <button class="btn-sm btn-green" onclick="loadCustomers('', true)">只看在线</button>
       </div>
       <div id="customersTable"></div>
+    </div>
+
+    <div id="tab-cards" class="tab-panel">
+      <div class="section-header">
+        <span class="section-title">充值卡管理 / 印卡密</span>
+        <div>
+          <button class="btn-sm btn-gray" onclick="exportUnusedCards()">导出未使用卡密</button>
+          <button class="btn-sm btn-primary" onclick="openGenCardModal()">+ 生成充值卡</button>
+        </div>
+      </div>
+      <div class="toolbar">
+        <input id="cardSearchInput" placeholder="搜索卡密 / 使用客户" onkeydown="if(event.key==='Enter')loadCards()">
+        <select id="cardStatusFilter" onchange="loadCards()">
+          <option value="">全部状态</option><option value="unused">未使用</option><option value="used">已使用</option>
+        </select>
+        <select id="cardTypeFilter" onchange="loadCards()">
+          <option value="">全部类型</option><option value="normal">普通卡</option><option value="night">包夜卡</option>
+        </select>
+        <button class="btn-sm btn-gray" onclick="loadCards()">刷新/搜索</button>
+      </div>
+      <div id="cardsTable"></div>
+    </div>
+
+    <div id="tab-equipment" class="tab-panel">
+      <div class="section-header">
+        <span class="section-title">绝密装备配置</span>
+        <button class="btn-sm btn-primary" onclick="saveEquipmentConfig()">保存装备配置</button>
+      </div>
+      <div class="panel" style="margin-bottom:14px">
+        <div class="mini-grid">
+          <label class="switch-line"><input type="checkbox" id="allowCustomLoadout"> 允许客户自定义配装</label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;">最大配装价值 <input type="number" id="maxLoadoutCost" min="0" class="config-input" value="65"> W</label>
+        </div>
+        <div class="hint" style="margin-top:8px">这些是拆分前全局装备配置迁移到商户端的本地参数；中央 Bridge/Agent 执行时消费商户订单里的配置，不在商户端直接控制设备。</div>
+      </div>
+      <div id="equipmentConfigTable"></div>
     </div>
 
     <div id="tab-orders" class="tab-panel">
@@ -785,15 +887,41 @@ def _admin_dashboard_html(admin: dict[str, Any]) -> str:
             <input type="text" id="settingSystemName" maxlength="32" placeholder="SNOW 自助下单">
             <div class="hint">显示在客户中心标题和顶部名称。</div>
           </div>
+          <div class="field-row">
+            <div class="field">
+              <label>机密每小时局数</label>
+              <input type="number" id="settingLimitRounds" min="0" value="4">
+              <div class="hint">普通 / 机密卡按小时折算局数。</div>
+            </div>
+            <div class="field">
+              <label>绝密每小时局数</label>
+              <input type="number" id="settingAbsoluteRoundsPerHour" min="0" value="3">
+              <div class="hint">绝密模式按小时折算局数。</div>
+            </div>
+          </div>
+          <div class="field">
+            <label class="switch-line"><input id="settingNightTimeCheck" type="checkbox"> 包夜卡登录时间限制</label>
+            <div id="nightTimeRange" class="field-row" style="margin-top:8px">
+              <div class="field"><label>开始时间</label><input type="time" id="settingNightStartTime" value="22:50"></div>
+              <div class="field"><label>结束时间</label><input type="time" id="settingNightEndTime" value="06:10"></div>
+            </div>
+            <div class="hint">保持拆分前规则：包夜卡只在指定时间段允许使用/登录。</div>
+          </div>
+          <div class="field">
+            <label>全局备注地址</label>
+            <input type="text" id="settingGlobalRadarUrl" maxlength="300" placeholder="例如全局雷达/备注链接">
+            <div class="hint">迁移拆分前前台展示用全局地址；为空则不显示。</div>
+          </div>
           <div class="field">
             <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
               <label class="switch-line"><input id="privacyMode" type="checkbox"> 隐私模式</label>
               <label style="display:inline-flex;align-items:center;gap:6px;color:#6b7280;">
-                <span>低于</span><input type="number" value="0" disabled style="width:90px;height:32px;background:#f3f4f6;"> <span>W 哈夫币时跳过</span>
+                <span>低于</span><input type="number" id="settingPrivacySkipBalance" min="0" value="0" style="width:90px;height:32px;"> <span>W 哈夫币时跳过</span>
               </label>
+              <label class="switch-line"><input id="settingAceEnabled" type="checkbox"> ACE 启用</label>
             </div>
             <div class="hint">开启后客户侧隐藏队伍码和 control session / fencing 等敏感控制细节，后台仍完整可见。</div>
-            <div class="readonly-note">拆分后设备余额、机器筛选、自动排钟属于中央控制服务；商户服务器只保存客户、余额、订单和本地计时。</div>
+            <div class="readonly-note">这些全局配置已迁移到商户服务器本地保存；设备执行、自动排钟仍由中央 Bridge/Agent 消费和落地。</div>
           </div>
           <div class="maintenance-box field">
             <label class="switch-line"><input id="maintenanceMode" type="checkbox"> 🛠 平台维护模式（开启后客户不能新下单）</label>
@@ -808,6 +936,65 @@ def _admin_dashboard_html(admin: dict[str, Any]) -> str:
   </div>
 
   <div id="toast" class="toast"></div>
+
+  <div id="genCardModal" class="modal-mask">
+    <div class="modal modal-wide">
+      <div class="modal-head">生成 / 印卡密</div>
+      <div class="modal-body">
+        <div class="field">
+          <label>卡类型</label>
+          <select id="cardType" onchange="toggleCardTypeFields()">
+            <option value="normal">普通充值卡</option>
+            <option value="night">包夜卡</option>
+          </select>
+        </div>
+        <div id="normalCardFields">
+          <div class="field">
+            <label>模式</label>
+            <select id="cardMode" onchange="updateCardEstimate()">
+              <option value="machine">机密模式（默认局数）</option>
+              <option value="absolute">绝密模式（绝密局数）</option>
+              <option value="hybrid">混合模式</option>
+            </select>
+          </div>
+          <div class="field-row">
+            <div class="field"><label>小时</label><input id="cardHours" type="number" min="0" value="1" oninput="updateCardEstimate()"></div>
+            <div class="field"><label>分钟</label><input id="cardMinutes" type="number" min="0" max="59" value="0" oninput="updateCardEstimate()"></div>
+          </div>
+          <div class="field-row">
+            <div class="field"><label>生成张数</label><input id="cardCount" type="number" min="1" max="100" value="1"></div>
+            <div class="field"><label>绝密局数（可覆盖）</label><input id="cardAbsoluteRounds" type="number" min="0" value="0"></div>
+          </div>
+          <div class="info-box" id="cardEstimate">预计：60 分钟 / 4 局</div>
+        </div>
+        <div id="nightCardFields" style="display:none">
+          <div class="field-row">
+            <div class="field"><label>包夜小时</label><input id="cardNightHours" type="number" min="0" value="8"></div>
+            <div class="field"><label>包夜分钟</label><input id="cardNightMinutes" type="number" min="0" max="59" value="0"></div>
+          </div>
+          <div class="field-row">
+            <div class="field"><label>生成张数</label><input id="cardCountNight" type="number" min="1" max="100" value="1"></div>
+            <div class="field"><label>战损扣除</label>
+              <select id="cardNightLossType" onchange="toggleNightLossFields()">
+                <option value="rounds">扣局数</option>
+                <option value="coins">扣哈夫币</option>
+              </select>
+            </div>
+          </div>
+          <div class="field-row">
+            <div class="field" id="nightRoundsField"><label>战损局数</label><input id="cardNightRounds" type="number" min="0" value="0"></div>
+            <div class="field" id="nightCoinsField" style="display:none"><label>战损哈夫币 W</label><input id="cardNightCoinLoss" type="number" min="0" value="0"></div>
+          </div>
+          <div class="hint">包夜卡继承“包夜卡登录时间限制”和开始/结束时间配置；卡密本身只存储时长与战损规则。</div>
+        </div>
+        <div id="generatedCards" style="display:none">
+          <div class="section-header" style="margin:14px 0 8px"><span class="section-title">已生成卡密</span><button class="btn-sm btn-gray" onclick="copyGeneratedCards()">复制全部</button></div>
+          <div id="cardListOutput" class="card-list"></div>
+        </div>
+      </div>
+      <div class="modal-foot"><button class="btn-sm btn-gray" onclick="closeModal('genCardModal')">关闭</button><button id="submitGenCards" class="btn-sm btn-primary" onclick="submitGenCards()">生成</button></div>
+    </div>
+  </div>
 
   <div id="addUserModal" class="modal-mask">
     <div class="modal">
@@ -901,6 +1088,9 @@ def _admin_dashboard_html(admin: dict[str, Any]) -> str:
 <script>
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let _defaultLimitRounds = 4;
+let _absoluteRoundsPerHour = 3;
+let _equipmentRows = [];
 async function api(path, opts={}) {
   const headers = {'Content-Type':'application/json', ...(opts.headers || {})};
   delete opts.headers;
@@ -945,6 +1135,8 @@ function showTab(name) {
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === 'tab-' + name));
   if (name === 'online') loadOnline();
   if (name === 'customers') loadCustomers();
+  if (name === 'cards') loadCards();
+  if (name === 'equipment') loadEquipmentConfig();
   if (name === 'orders') loadOrders();
   if (name === 'settings') loadSettings();
 }
@@ -1059,6 +1251,164 @@ async function deleteCustomer(id, name='') {
     toast('客户已删除'); await loadCustomers(); await loadOnline(); await loadOverview();
   } catch(e) { toast(e.message); }
 }
+
+function cardTypeLabel(t) { return t === 'night' ? '包夜卡' : '普通卡'; }
+function cardModeBadge(mode) {
+  if (mode === 'absolute') return '<span class="badge badge-absolute">绝密</span>';
+  if (mode === 'hybrid') return '<span class="badge badge-purple">混合</span>';
+  return '<span class="badge badge-machine">机密</span>';
+}
+async function loadCards() {
+  const q = $('cardSearchInput')?.value || '';
+  const st = $('cardStatusFilter')?.value || '';
+  const type = $('cardTypeFilter')?.value || '';
+  const d = await api('/api/admin/cards?keyword=' + encodeURIComponent(q) + '&status=' + encodeURIComponent(st) + '&type=' + encodeURIComponent(type));
+  renderCards(d.cards || []);
+}
+function renderCards(cards) {
+  if (!cards.length) { $('cardsTable').innerHTML = '<div class="empty-state">暂无卡密，点击右上角生成。</div>'; return; }
+  $('cardsTable').innerHTML = `<table class="data-table"><thead><tr>
+    <th>卡密</th><th>类型/模式</th><th>时长</th><th>局数</th><th>战损</th><th>状态</th><th>使用客户</th><th>创建/使用时间</th><th>操作</th>
+  </tr></thead><tbody>` + cards.map(c => {
+    const used = !!c.used;
+    return `<tr>
+      <td style="font-family:Consolas,monospace"><b>${esc(c.card_code)}</b></td>
+      <td>${cardModeBadge(c.mode)} <span class="badge ${c.card_type === 'night' ? 'badge-purple' : 'badge-machine'}">${cardTypeLabel(c.card_type)}</span></td>
+      <td>${fmtMin(c.minutes)}</td>
+      <td>${esc(c.rounds || c.absolute_rounds || 0)}</td>
+      <td>${c.night_coin_loss ? esc(c.night_coin_loss) + ' W' : '-'}</td>
+      <td><span class="badge ${used ? 'badge-used' : 'badge-unused'}">${used ? '已使用' : '未使用'}</span></td>
+      <td>${esc(c.used_by_name || '-')}</td>
+      <td>${fmtDate(c.created_at)}<br><span class="hint">${fmtDate(c.used_at)}</span></td>
+      <td>${used ? '<span class="hint">不可删除</span>' : `<button class="btn-sm btn-danger" onclick="deleteCard(decodeURIComponent('${encodeURIComponent(c.card_code)}'))">删除</button>`}</td>
+    </tr>`;
+  }).join('') + '</tbody></table>';
+}
+function openGenCardModal() {
+  $('cardType').value = 'normal';
+  $('cardMode').value = 'machine';
+  $('cardHours').value = '1';
+  $('cardMinutes').value = '0';
+  $('cardCount').value = '1';
+  $('cardAbsoluteRounds').value = '0';
+  $('cardNightHours').value = '8';
+  $('cardNightMinutes').value = '0';
+  $('cardCountNight').value = '1';
+  $('cardNightRounds').value = '0';
+  $('cardNightCoinLoss').value = '0';
+  $('generatedCards').style.display = 'none';
+  $('cardListOutput').innerHTML = '';
+  toggleCardTypeFields();
+  openModal('genCardModal');
+}
+function toggleCardTypeFields() {
+  const isNight = $('cardType').value === 'night';
+  $('normalCardFields').style.display = isNight ? 'none' : '';
+  $('nightCardFields').style.display = isNight ? '' : 'none';
+  updateCardEstimate();
+  toggleNightLossFields();
+}
+function toggleNightLossFields() {
+  const isCoins = $('cardNightLossType')?.value === 'coins';
+  if ($('nightRoundsField')) $('nightRoundsField').style.display = isCoins ? 'none' : '';
+  if ($('nightCoinsField')) $('nightCoinsField').style.display = isCoins ? '' : 'none';
+}
+function calculateCardRounds(totalMinutes, mode) {
+  const perHour = mode === 'machine' ? Number(_defaultLimitRounds || 0) : Number(_absoluteRoundsPerHour || 0);
+  if (!totalMinutes || !perHour) return 0;
+  return Math.max(perHour, Math.floor((totalMinutes / 60) * perHour));
+}
+function updateCardEstimate() {
+  if (!$('cardEstimate')) return;
+  const minutes = Number($('cardHours').value || 0) * 60 + Number($('cardMinutes').value || 0);
+  const mode = $('cardMode').value;
+  const override = Number($('cardAbsoluteRounds').value || 0);
+  const rounds = override > 0 ? override : calculateCardRounds(minutes, mode);
+  $('cardEstimate').textContent = `预计：${fmtMin(minutes)} / ${rounds} 局（默认机密 ${_defaultLimitRounds} 局/时，绝密 ${_absoluteRoundsPerHour} 局/时）`;
+}
+async function submitGenCards() {
+  const isNight = $('cardType').value === 'night';
+  const payload = isNight ? {
+    card_type: 'night',
+    mode: 'machine',
+    minutes: Number($('cardNightHours').value || 0) * 60 + Number($('cardNightMinutes').value || 0),
+    count: Number($('cardCountNight').value || 1),
+    rounds: $('cardNightLossType').value === 'rounds' ? Number($('cardNightRounds').value || 0) : 0,
+    night_coin_loss: $('cardNightLossType').value === 'coins' ? Number($('cardNightCoinLoss').value || 0) : 0,
+  } : {
+    card_type: 'normal',
+    mode: $('cardMode').value,
+    minutes: Number($('cardHours').value || 0) * 60 + Number($('cardMinutes').value || 0),
+    count: Number($('cardCount').value || 1),
+    absolute_rounds: Number($('cardAbsoluteRounds').value || 0),
+  };
+  if (!payload.minutes) { toast('请填写卡密时长'); return; }
+  $('submitGenCards').disabled = true;
+  try {
+    const d = await api('/api/admin/cards/generate', {method:'POST', body:JSON.stringify(payload)});
+    const cards = d.cards || [];
+    $('generatedCards').style.display = '';
+    $('cardListOutput').innerHTML = cards.map(c => `<div class="card-item"><span>${esc(c.card_code)}</span><span>${fmtMin(c.minutes)} / ${esc(c.rounds || 0)}局</span></div>`).join('');
+    toast(`已生成 ${cards.length} 张卡密`);
+    await loadCards();
+  } catch(e) { toast(e.message); }
+  finally { $('submitGenCards').disabled = false; }
+}
+async function copyGeneratedCards() {
+  const text = Array.from(document.querySelectorAll('#cardListOutput .card-item span:first-child')).map(x => x.textContent).join('\n');
+  if (!text) { toast('没有可复制卡密'); return; }
+  try { await navigator.clipboard.writeText(text); }
+  catch(_e) {
+    const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
+  }
+  toast('卡密已复制');
+}
+async function deleteCard(code) {
+  const ok = await appConfirm('删除充值卡', `确定删除未使用卡密「${code}」？`, 'btn-danger');
+  if (!ok) return;
+  try {
+    await api('/api/admin/cards/' + encodeURIComponent(code), {method:'DELETE'});
+    toast('卡密已删除');
+    await loadCards();
+  } catch(e) { toast(e.message); }
+}
+function exportUnusedCards() {
+  const type = $('cardTypeFilter')?.value || '';
+  location.href = '/api/admin/cards/export-unused?type=' + encodeURIComponent(type);
+}
+
+async function loadEquipmentConfig() {
+  const d = await api('/api/admin/equipment-config');
+  _equipmentRows = d.equipment || [];
+  $('allowCustomLoadout').checked = !!d.allow_custom_loadout;
+  $('maxLoadoutCost').value = d.max_loadout_cost ?? 65;
+  renderEquipmentConfig();
+}
+function renderEquipmentConfig() {
+  if (!_equipmentRows.length) { $('equipmentConfigTable').innerHTML = '<div class="empty-state">暂无装备目录</div>'; return; }
+  $('equipmentConfigTable').innerHTML = `<table class="data-table"><thead><tr>
+    <th>分类</th><th>装备</th><th>价格/W</th><th>启用</th><th>客户端支持</th>
+  </tr></thead><tbody>` + _equipmentRows.map((e, idx) => `<tr>
+    <td>${esc(e.type_label || e.equipment_type)}</td>
+    <td><b>${esc(e.equipment_name)}</b></td>
+    <td><input class="config-input" type="number" min="0" value="${esc(e.price || 0)}" onchange="updateEquipmentPrice(${idx}, this.value)"></td>
+    <td><label class="switch-line"><input type="checkbox" ${e.enabled ? 'checked' : ''} onchange="updateEquipmentEnabled(${idx}, this.checked)"> 启用</label></td>
+    <td>${e.client_supported ? '<span class="badge badge-unused">支持</span>' : '<span class="badge badge-offline">不支持</span>'}</td>
+  </tr>`).join('') + '</tbody></table>';
+}
+function updateEquipmentPrice(idx, value) { if (_equipmentRows[idx]) _equipmentRows[idx].price = Math.max(0, Number(value || 0)); }
+function updateEquipmentEnabled(idx, checked) { if (_equipmentRows[idx]) _equipmentRows[idx].enabled = checked ? 1 : 0; }
+async function saveEquipmentConfig() {
+  try {
+    const d = await api('/api/admin/equipment-config', {method:'POST', body:JSON.stringify({
+      equipment: _equipmentRows,
+      max_loadout_cost: Number($('maxLoadoutCost').value || 0),
+      allow_custom_loadout: $('allowCustomLoadout').checked,
+    })});
+    _equipmentRows = d.equipment || _equipmentRows;
+    toast('装备配置已保存');
+  } catch(e) { toast(e.message); }
+}
 async function loadOrders() {
   const q = $('orderKeyword')?.value || '';
   const st = $('orderStatus')?.value || '';
@@ -1125,12 +1475,28 @@ async function orderDetail(id) {
 async function loadSettings() {
   const d = await api('/api/admin/settings');
   const s = d.settings;
+  _defaultLimitRounds = Number(s.default_limit_rounds ?? 4);
+  _absoluteRoundsPerHour = Number(s.absolute_rounds_per_hour ?? 3);
   $('settingSystemName').value = s.system_name || 'SNOW 自助下单';
+  $('settingLimitRounds').value = _defaultLimitRounds;
+  $('settingAbsoluteRoundsPerHour').value = _absoluteRoundsPerHour;
+  $('settingNightTimeCheck').checked = !!s.night_time_check;
+  $('settingNightStartTime').value = s.night_start_time || '22:50';
+  $('settingNightEndTime').value = s.night_end_time || '06:10';
+  $('settingGlobalRadarUrl').value = s.global_radar_url || '';
   $('privacyMode').checked = !!s.privacy_mode_enabled;
+  $('settingPrivacySkipBalance').value = Number(s.privacy_skip_balance || 0);
+  $('settingAceEnabled').checked = !!s.ace_enabled;
   $('maintenanceMode').checked = !!s.maintenance_mode_enabled;
   $('maintenanceMessage').value = s.maintenance_message || '';
   $('announcementEnabled').checked = !!s.announcement_enabled;
   $('noticeEditor').innerHTML = s.announcement_text || '';
+  toggleNightTimeRange();
+  updateCardEstimate();
+}
+function toggleNightTimeRange() {
+  if (!$('nightTimeRange')) return;
+  $('nightTimeRange').style.opacity = $('settingNightTimeCheck').checked ? '1' : '.45';
 }
 function noticeExec(cmd, val) {
   $('noticeEditor').focus();
@@ -1155,13 +1521,22 @@ async function saveNotice() {
 async function saveSettings() {
   await api('/api/admin/settings', {method:'PUT', body:JSON.stringify({
     system_name: $('settingSystemName').value,
+    default_limit_rounds: Number($('settingLimitRounds').value || 0),
+    absolute_rounds_per_hour: Number($('settingAbsoluteRoundsPerHour').value || 0),
+    night_time_check: $('settingNightTimeCheck').checked,
+    night_start_time: $('settingNightStartTime').value,
+    night_end_time: $('settingNightEndTime').value,
+    global_radar_url: $('settingGlobalRadarUrl').value,
     privacy_mode_enabled: $('privacyMode').checked,
+    privacy_skip_balance: Number($('settingPrivacySkipBalance').value || 0),
+    ace_enabled: $('settingAceEnabled').checked,
     maintenance_mode_enabled: $('maintenanceMode').checked,
     maintenance_message: $('maintenanceMessage').value,
     announcement_enabled: $('announcementEnabled').checked,
     announcement_text: $('noticeEditor').innerHTML
   })});
   toast('保存成功');
+  await loadSettings();
   await loadOverview();
 }
 async function loadAll() {
@@ -1170,6 +1545,7 @@ async function loadAll() {
   renderCustomers(online.customers.slice(0, 6), 'overviewOnline');
   renderOrders(orders.orders.filter(o => ['claiming_device','device_claimed','commanding','waiting_ready_timer','running','stopping'].includes(o.status)).slice(0, 6), 'overviewOrders');
 }
+$('settingNightTimeCheck')?.addEventListener('change', toggleNightTimeRange);
 loadAll().then(loadSettings).catch(e => toast(e.message));
 </script>
 </body>
