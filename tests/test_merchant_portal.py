@@ -870,3 +870,49 @@ def test_admin_origin_check_and_backup_roundtrip(app_and_bridge):
     logs = admin.get("/api/admin/audit-logs").json()["logs"]
     assert any(l["action"] == "backup_create" for l in logs)
     assert any(l["action"] == "backup_restore" for l in logs)
+
+
+def test_admin_role_management_and_owner_only_mutations(app_and_bridge):
+    app, _bridge = app_and_bridge
+    owner = TestClient(app)
+    assert owner.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+
+    created = owner.post("/api/admin/admins", json={"username": "ops", "password": "ops123456", "role": "operator"})
+    assert created.status_code == 200, created.text
+    operator_id = created.json()["admin"]["id"]
+    admins = owner.get("/api/admin/admins").json()["admins"]
+    owner_id = next(a["id"] for a in admins if a["username"] == "admin")
+    assert any(a["username"] == "ops" and a["role"] == "operator" for a in admins)
+    assert "商户管理员" in owner.get("/merchant-admin").text
+
+    operator = TestClient(app)
+    assert operator.post("/api/admin/login", json={"username": "ops", "password": "ops123456"}).status_code == 200
+    assert operator.get("/api/admin/customers").status_code == 200
+    assert operator.get("/api/admin/orders").status_code == 200
+    denied = operator.post("/api/admin/settings", json={"system_name": "bad"})
+    assert denied.status_code == 403
+    assert denied.json()["error"] == "permission_denied"
+    assert operator.post("/api/admin/admins", json={"username": "bad", "password": "123456"}).status_code == 403
+    assert operator.post("/api/admin/cards/generate", json={"minutes": 60, "count": 1}).status_code == 403
+
+    last_owner_status = owner.put(f"/api/admin/admins/{owner_id}/status", json={"status": "disabled"})
+    assert last_owner_status.status_code == 409
+    assert last_owner_status.json()["error"] == "last_owner"
+    last_owner_role = owner.put(f"/api/admin/admins/{owner_id}/role", json={"role": "operator"})
+    assert last_owner_role.status_code == 409
+    assert last_owner_role.json()["error"] == "last_owner"
+
+    reset = owner.put(f"/api/admin/admins/{operator_id}/password", json={"password": "ops654321"})
+    assert reset.status_code == 200, reset.text
+    assert operator.get("/api/admin/customers").status_code == 401
+    assert operator.post("/api/admin/login", json={"username": "ops", "password": "ops654321"}).status_code == 200
+
+    disabled = owner.put(f"/api/admin/admins/{operator_id}/status", json={"status": "disabled"})
+    assert disabled.status_code == 200, disabled.text
+    assert operator.get("/api/admin/customers").status_code == 401
+    assert TestClient(app).post("/api/admin/login", json={"username": "ops", "password": "ops654321"}).status_code == 401
+
+    logs = owner.get("/api/admin/audit-logs").json()["logs"]
+    assert any(l["action"] == "admin_create" for l in logs)
+    assert any(l["action"] == "admin_password_reset" for l in logs)
+    assert any(l["action"] == "admin_status_update" for l in logs)

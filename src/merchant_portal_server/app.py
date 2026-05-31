@@ -343,6 +343,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         announcement_text: str = Form(""),
         admin: dict[str, Any] = Depends(current_admin),
     ) -> RedirectResponse:
+        require_owner_admin(admin)
         service.update_settings(
             admin["id"],
             {
@@ -640,15 +641,18 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
 
     @app.put("/api/admin/settings")
     def api_admin_put_settings(body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
         return json_ok(settings=admin_settings_view(service.update_settings(admin["id"], normalize_admin_settings_payload(body))))
 
     @app.post("/api/admin/settings")
     def api_admin_post_settings(body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
         payload = body.get("settings") if isinstance(body.get("settings"), dict) else body
         return json_ok(msg="保存成功", settings=admin_settings_view(service.update_settings(admin["id"], normalize_admin_settings_payload(payload))))
 
     @app.post("/api/admin/notice")
     def api_admin_notice(body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
         content = str(body.get("content") or "")
         service.update_settings(admin["id"], {"announcement_text": content, "announcement_enabled": bool(content.strip())})
         return json_ok(msg="保存成功")
@@ -659,6 +663,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
 
     @app.post("/api/admin/equipment-config")
     def api_admin_equipment_config_save(body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
         service.update_equipment_config(admin["id"], body)
         return json_ok(msg="保存成功", **service.get_equipment_config())
 
@@ -668,7 +673,8 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         return json_ok(cards=cards, total=len(cards))
 
     @app.post("/api/admin/cards/generate")
-    def api_admin_cards_generate(body: dict[str, Any] = Body(...), _admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+    def api_admin_cards_generate(body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
         minutes = int(body.get("minutes") or 0)
         if minutes <= 0:
             minutes = int(body.get("hours") or 0) * 60 + int(body.get("days") or 0) * 24 * 60
@@ -683,7 +689,8 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         return json_ok(msg="生成成功", cards=cards)
 
     @app.delete("/api/admin/cards/{code}")
-    def api_admin_card_delete(code: str, _admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+    def api_admin_card_delete(code: str, admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
         return json_ok(**service.delete_recharge_card(code))
 
     @app.get("/api/admin/cards/export-unused")
@@ -712,7 +719,8 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         return json_ok(customers=customers, total=len(customers))
 
     @app.post("/api/admin/customers")
-    def api_admin_customer_create(body: dict[str, Any] = Body(...), _admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+    def api_admin_customer_create(body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
         customer = service.admin_create_customer(
             username=body.get("username") or "",
             password=body.get("password") or "123456",
@@ -723,7 +731,8 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         return json_ok(customer=customer)
 
     @app.put("/api/admin/customers/{customer_id}/balance")
-    def api_admin_customer_balance(customer_id: int, body: dict[str, Any] = Body(...), _admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+    def api_admin_customer_balance(customer_id: int, body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
         customer = service.admin_update_customer_balance(
             customer_id,
             balance_minutes=body.get("balance_minutes") if "balance_minutes" in body else None,
@@ -734,15 +743,18 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         return json_ok(customer=customer)
 
     @app.put("/api/admin/customers/{customer_id}/status")
-    def api_admin_customer_status(customer_id: int, body: dict[str, Any] = Body(...), _admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+    def api_admin_customer_status(customer_id: int, body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
         return json_ok(customer=service.admin_set_customer_status(customer_id, body.get("status") or "active"))
 
     @app.put("/api/admin/customers/{customer_id}/password")
-    def api_admin_customer_password(customer_id: int, body: dict[str, Any] = Body(...), _admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+    def api_admin_customer_password(customer_id: int, body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
         return json_ok(**service.admin_reset_customer_password(customer_id, body.get("password") or "123456"))
 
     @app.delete("/api/admin/customers/{customer_id}")
-    def api_admin_customer_delete(customer_id: int, _admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+    def api_admin_customer_delete(customer_id: int, admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
         return json_ok(**service.admin_delete_customer(customer_id))
 
     @app.get("/api/admin/orders")
@@ -759,6 +771,43 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     def api_admin_audit_logs(limit: int = 200, _admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
         logs = service.admin_audit_logs(limit=limit)
         return json_ok(logs=logs, total=len(logs))
+
+    @app.get("/api/admin/admins")
+    def api_admin_admins(_admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        admins = service.admin_list_admins()
+        return json_ok(admins=admins, total=len(admins))
+
+    @app.post("/api/admin/admins")
+    def api_admin_create_admin(body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
+        created = service.admin_create_admin(
+            admin,
+            username=body.get("username") or "",
+            password=body.get("password") or "",
+            role=body.get("role") or "operator",
+            status=body.get("status") or "active",
+        )
+        return json_ok(msg="管理员已创建", admin=created)
+
+    @app.put("/api/admin/admins/{admin_id}/role")
+    def api_admin_set_admin_role(admin_id: int, body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
+        return json_ok(msg="管理员权限已更新", admin=service.admin_set_admin_role(admin, admin_id, body.get("role") or "operator"))
+
+    @app.put("/api/admin/admins/{admin_id}/status")
+    def api_admin_set_admin_status(admin_id: int, body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
+        return json_ok(msg="管理员状态已更新", admin=service.admin_set_admin_status(admin, admin_id, body.get("status") or "active"))
+
+    @app.put("/api/admin/admins/{admin_id}/password")
+    def api_admin_reset_admin_password(admin_id: int, body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
+        return json_ok(msg="管理员密码已重置", **service.admin_reset_admin_password(admin, admin_id, body.get("password") or ""))
+
+    @app.delete("/api/admin/admins/{admin_id}")
+    def api_admin_delete_admin(admin_id: int, admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
+        return json_ok(msg="管理员已删除", **service.admin_delete_admin(admin, admin_id))
 
     @app.get("/api/admin/backup")
     def api_admin_backup_list(_admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
@@ -843,11 +892,13 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         return json_ok(detail=order, order=order, matches=[], matches_summary={"count": 0})
 
     @app.post("/api/admin/orders/{order_id}/add-time")
-    def api_admin_order_add_time(order_id: int, body: dict[str, Any] = Body(...), _admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+    def api_admin_order_add_time(order_id: int, body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
         return json_ok(order=service.admin_adjust_order_time(order_id, add_minutes=int(body.get("add_minutes") or 0)))
 
     @app.post("/api/admin/add-time/{order_id}")
-    def api_admin_add_time_legacy(order_id: int, body: dict[str, Any] = Body(default_factory=dict), _admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+    def api_admin_add_time_legacy(order_id: int, body: dict[str, Any] = Body(default_factory=dict), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
         add_minutes = int(body.get("add_minutes") or 0)
         if not add_minutes:
             sign = -1 if str(body.get("op") or body.get("operation") or "").lower() in {"sub", "minus", "subtract"} else 1
@@ -855,7 +906,8 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         return json_ok(order=service.admin_adjust_order_time(order_id, add_minutes=add_minutes), msg="订单时长已调整")
 
     @app.post("/api/admin/orders/{order_id}/stop")
-    def api_admin_order_stop(order_id: int, _admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+    def api_admin_order_stop(order_id: int, admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
         return json_ok(order=service.admin_stop_order(order_id))
 
     @app.post("/internal/workers/events")
@@ -1472,6 +1524,7 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
     <div class="nav-tab" data-tab="cards">充值卡</div>
     <div class="nav-tab" data-tab="equipment">装备配置</div>
     <div class="nav-tab" data-tab="orders">订单管理</div>
+    <div class="nav-tab" data-tab="admins">管理员</div>
     <div class="nav-tab" data-tab="audit">审计日志</div>
     <div class="nav-tab" data-tab="backup">备份恢复</div>
     <div class="nav-tab" data-tab="settings">系统设置</div>
@@ -1567,6 +1620,15 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
         <button class="btn-sm btn-gray" onclick="loadOrders()">搜索</button>
       </div>
       <div id="ordersTable"></div>
+    </div>
+
+    <div id="tab-admins" class="tab-panel">
+      <div class="section-header">
+        <span class="section-title">商户管理员 / 权限管理</span>
+        <div><button class="btn-sm btn-primary" onclick="openAdminModal()">+ 新建管理员</button><button class="btn-sm btn-gray" onclick="loadAdmins()">刷新</button></div>
+      </div>
+      <div class="hint" style="margin-bottom:10px">owner 可配置系统、客户余额、卡密、设备直控、备份恢复和管理员；operator 仅用于查看运营数据、客户、订单、设备和审计。</div>
+      <div id="adminsTable"></div>
     </div>
 
     <div id="tab-audit" class="tab-panel">
@@ -1777,6 +1839,34 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
     </div>
   </div>
 
+  <div id="adminModal" class="modal-mask">
+    <div class="modal">
+      <div class="modal-head">新建管理员</div>
+      <div class="modal-body">
+        <div class="field"><label>用户名</label><input id="adminNewUsername" placeholder="后台登录用户名"></div>
+        <div class="field"><label>密码</label><input id="adminNewPassword" value="123456" placeholder="至少 6 位"></div>
+        <div class="field-row">
+          <div class="field"><label>角色</label><select id="adminNewRole"><option value="operator">operator / 只读运营</option><option value="owner">owner / 完整管理</option></select></div>
+          <div class="field"><label>状态</label><select id="adminNewStatus"><option value="active">active</option><option value="disabled">disabled</option></select></div>
+        </div>
+        <div class="hint">正式上线建议日常使用 operator 查看数据，owner 只用于配置、充值卡、客户余额、设备直控、备份恢复。</div>
+      </div>
+      <div class="modal-foot"><button class="btn-sm btn-gray" onclick="closeModal('adminModal')">取消</button><button class="btn-sm btn-primary" onclick="submitCreateAdmin()">创建</button></div>
+    </div>
+  </div>
+
+  <div id="adminPwdModal" class="modal-mask">
+    <div class="modal">
+      <div class="modal-head">重置管理员密码</div>
+      <div class="modal-body">
+        <input id="adminPwdId" type="hidden">
+        <div class="field"><label>管理员</label><input id="adminPwdUsername" disabled style="background:#f9fafb"></div>
+        <div class="field"><label>新密码</label><input id="adminPwdNew" value="123456" placeholder="至少 6 位"></div>
+      </div>
+      <div class="modal-foot"><button class="btn-sm btn-gray" onclick="closeModal('adminPwdModal')">取消</button><button class="btn-sm btn-primary" onclick="submitResetAdminPwd()">确认重置</button></div>
+    </div>
+  </div>
+
   <div id="addUserModal" class="modal-mask">
     <div class="modal">
       <div class="modal-head">创建客户</div>
@@ -1930,6 +2020,8 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
 <script>
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const CURRENT_ADMIN_ROLE = '__ROLE__';
+const IS_OWNER = CURRENT_ADMIN_ROLE === 'owner';
 let _defaultLimitRounds = 4;
 let _absoluteRoundsPerHour = 3;
 let _equipmentRows = [];
@@ -1982,6 +2074,7 @@ function showTab(name) {
   if (name === 'cards') loadCards();
   if (name === 'equipment') loadEquipmentConfig();
   if (name === 'orders') loadOrders();
+  if (name === 'admins') loadAdmins();
   if (name === 'audit') loadAuditLogs();
   if (name === 'backup') loadBackups();
   if (name === 'settings') loadSettings();
@@ -2517,6 +2610,77 @@ async function orderDetail(id) {
     <tr><th>失败原因</th><td colspan="3">${esc(o.fail_reason || '-')}</td></tr>
   </tbody></table>`;
   openModal('orderDetailModal');
+}
+async function loadAdmins() {
+  const d = await api('/api/admin/admins');
+  const rows = d.admins || [];
+  if (!rows.length) { $('adminsTable').innerHTML = '<div class="empty-state">暂无管理员</div>'; return; }
+  $('adminsTable').innerHTML = `<table class="data-table"><thead><tr>
+    <th>ID</th><th>用户名</th><th>角色</th><th>状态</th><th>最后登录</th><th>创建/更新</th><th>操作</th>
+  </tr></thead><tbody>` + rows.map(a => {
+    const encodedName = encodeURIComponent(a.username || '');
+    const roleBadge = a.role === 'owner' ? '<span class="badge badge-purple">owner</span>' : '<span class="badge badge-waiting">operator</span>';
+    const statusBadge = a.status === 'active' ? '<span class="badge badge-online">active</span>' : '<span class="badge badge-offline">disabled</span>';
+    const actions = IS_OWNER ? `
+      <button class="btn-sm btn-gray" onclick="openResetAdminPwd(${a.id}, decodeURIComponent('${encodedName}'))">改密码</button>
+      <button class="btn-sm btn-primary" onclick="changeAdminRole(${a.id}, '${a.role === 'owner' ? 'operator' : 'owner'}')">${a.role === 'owner' ? '降为 operator' : '升为 owner'}</button>
+      <button class="btn-sm ${a.status === 'active' ? 'btn-amber' : 'btn-green'}" onclick="changeAdminStatus(${a.id}, '${a.status === 'active' ? 'disabled' : 'active'}')">${a.status === 'active' ? '禁用' : '启用'}</button>
+      <button class="btn-sm btn-danger" onclick="deleteAdmin(${a.id}, decodeURIComponent('${encodedName}'))">删除</button>` : '<span class="hint">仅 owner 可修改</span>';
+    return `<tr>
+      <td>${esc(a.id)}</td><td>${esc(a.username)}</td><td>${roleBadge}</td><td>${statusBadge}</td>
+      <td>${fmtDate(a.last_login_at)}</td><td>${fmtDate(a.created_at)}<br><span class="hint">${fmtDate(a.updated_at)}</span></td><td>${actions}</td>
+    </tr>`;
+  }).join('') + '</tbody></table>';
+}
+function openAdminModal() {
+  if (!IS_OWNER) { toast('仅 owner 可新建管理员'); return; }
+  $('adminNewUsername').value = '';
+  $('adminNewPassword').value = '123456';
+  $('adminNewRole').value = 'operator';
+  $('adminNewStatus').value = 'active';
+  openModal('adminModal');
+}
+async function submitCreateAdmin() {
+  try {
+    await api('/api/admin/admins', {method:'POST', body:JSON.stringify({
+      username: $('adminNewUsername').value.trim(),
+      password: $('adminNewPassword').value,
+      role: $('adminNewRole').value,
+      status: $('adminNewStatus').value,
+    })});
+    closeModal('adminModal'); toast('管理员已创建'); await loadAdmins(); await loadAuditLogs();
+  } catch(e) { toast(e.message); }
+}
+function openResetAdminPwd(id, name) {
+  if (!IS_OWNER) { toast('仅 owner 可修改管理员密码'); return; }
+  $('adminPwdId').value = id;
+  $('adminPwdUsername').value = name || id;
+  $('adminPwdNew').value = '123456';
+  openModal('adminPwdModal');
+}
+async function submitResetAdminPwd() {
+  try {
+    await api('/api/admin/admins/' + $('adminPwdId').value + '/password', {method:'PUT', body:JSON.stringify({password:$('adminPwdNew').value})});
+    closeModal('adminPwdModal'); toast('管理员密码已重置'); await loadAdmins(); await loadAuditLogs();
+  } catch(e) { toast(e.message); }
+}
+async function changeAdminRole(id, role) {
+  const ok = await appConfirm('修改管理员角色', `确认将管理员 #${id} 修改为 ${role}？`, role === 'owner' ? 'btn-primary' : 'btn-amber');
+  if (!ok) return;
+  try { await api('/api/admin/admins/' + id + '/role', {method:'PUT', body:JSON.stringify({role})}); toast('管理员角色已更新'); await loadAdmins(); await loadAuditLogs(); }
+  catch(e) { toast(e.message); }
+}
+async function changeAdminStatus(id, status) {
+  const ok = await appConfirm('修改管理员状态', `确认将管理员 #${id} 修改为 ${status}？`, status === 'active' ? 'btn-green' : 'btn-amber');
+  if (!ok) return;
+  try { await api('/api/admin/admins/' + id + '/status', {method:'PUT', body:JSON.stringify({status})}); toast('管理员状态已更新'); await loadAdmins(); await loadAuditLogs(); }
+  catch(e) { toast(e.message); }
+}
+async function deleteAdmin(id, name) {
+  const ok = await appConfirm('删除管理员', `确认删除管理员「${name || id}」？其后台会话会同时失效。`, 'btn-danger');
+  if (!ok) return;
+  try { await api('/api/admin/admins/' + id, {method:'DELETE'}); toast('管理员已删除'); await loadAdmins(); await loadAuditLogs(); }
+  catch(e) { toast(e.message); }
 }
 async function loadAuditLogs() {
   const d = await api('/api/admin/audit-logs?limit=300');

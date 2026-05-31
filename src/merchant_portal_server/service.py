@@ -1399,6 +1399,148 @@ class MerchantService:
     def public_admin(self, row: dict[str, Any]) -> dict[str, Any]:
         return {"id": int(row["id"]), "username": row["username"], "role": row.get("role") or "admin", "status": row.get("status") or "active"}
 
+    def _admin_view(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        d = dict(row)
+        return {
+            "id": int(d["id"]),
+            "username": d["username"],
+            "role": d.get("role") or "operator",
+            "status": d.get("status") or "active",
+            "last_login_at": d.get("last_login_at"),
+            "created_at": d.get("created_at"),
+            "updated_at": d.get("updated_at"),
+        }
+
+    @staticmethod
+    def _normalize_admin_role(role: Any) -> str:
+        role_s = str(role or "operator").strip().lower()
+        if role_s in {"owner", "admin", "superadmin"}:
+            return "owner"
+        return "operator"
+
+    def _active_owner_count_locked(self, con: sqlite3.Connection, *, exclude_admin_id: int | None = None) -> int:
+        if exclude_admin_id is None:
+            return int(con.execute("SELECT COUNT(*) AS n FROM merchant_admins WHERE role='owner' AND status='active'").fetchone()["n"] or 0)
+        return int(con.execute("SELECT COUNT(*) AS n FROM merchant_admins WHERE role='owner' AND status='active' AND id<>?", (exclude_admin_id,)).fetchone()["n"] or 0)
+
+    def admin_list_admins(self) -> list[dict[str, Any]]:
+        with self.db.connect() as con:
+            rows = con.execute("SELECT * FROM merchant_admins ORDER BY id").fetchall()
+        return [self._admin_view(r) for r in rows]
+
+    def admin_create_admin(self, actor: dict[str, Any] | None, *, username: str, password: str, role: str = "operator", status: str = "active") -> dict[str, Any]:
+        username = str(username or "").strip()
+        role = self._normalize_admin_role(role)
+        status = str(status or "active").strip().lower()
+        if not username or len(username) > 64:
+            raise MerchantError("bad_username", "管理员用户名不合法")
+        if len(str(password or "")) < 6:
+            raise MerchantError("bad_password", "管理员密码至少 6 位")
+        if status not in {"active", "disabled"}:
+            raise MerchantError("bad_status", "管理员状态必须是 active 或 disabled")
+        now_s = iso()
+        with self.db.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            try:
+                cur = con.execute(
+                    "INSERT INTO merchant_admins(username,password_hash,role,status,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                    (username, hash_password(password), role, status, now_s, now_s),
+                )
+                admin_id = int(cur.lastrowid)
+                self._log_admin_action_locked(con, actor, "admin_create", "admin", admin_id, {"username": username, "role": role, "status": status})
+                con.commit()
+            except sqlite3.IntegrityError:
+                con.rollback()
+                raise MerchantError("username_exists", "管理员用户名已存在", 409)
+            except Exception:
+                con.rollback()
+                raise
+        return self._admin_view({"id": admin_id, "username": username, "role": role, "status": status, "created_at": now_s, "updated_at": now_s, "last_login_at": None})
+
+    def admin_set_admin_role(self, actor: dict[str, Any] | None, admin_id: int, role: str) -> dict[str, Any]:
+        role = self._normalize_admin_role(role)
+        with self.db.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            try:
+                row = con.execute("SELECT * FROM merchant_admins WHERE id=?", (admin_id,)).fetchone()
+                if not row:
+                    raise MerchantError("not_found", "管理员不存在", 404)
+                if row["role"] == "owner" and role != "owner" and row["status"] == "active" and self._active_owner_count_locked(con, exclude_admin_id=admin_id) <= 0:
+                    raise MerchantError("last_owner", "不能降级最后一个 active owner", 409)
+                con.execute("UPDATE merchant_admins SET role=?,updated_at=? WHERE id=?", (role, iso(), admin_id))
+                self._log_admin_action_locked(con, actor, "admin_role_update", "admin", admin_id, {"role": role})
+                con.commit()
+            except Exception:
+                con.rollback()
+                raise
+        return self.admin_get_admin(admin_id)
+
+    def admin_set_admin_status(self, actor: dict[str, Any] | None, admin_id: int, status: str) -> dict[str, Any]:
+        status = str(status or "active").strip().lower()
+        if status not in {"active", "disabled"}:
+            raise MerchantError("bad_status", "管理员状态必须是 active 或 disabled")
+        with self.db.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            try:
+                row = con.execute("SELECT * FROM merchant_admins WHERE id=?", (admin_id,)).fetchone()
+                if not row:
+                    raise MerchantError("not_found", "管理员不存在", 404)
+                if row["role"] == "owner" and status != "active" and row["status"] == "active" and self._active_owner_count_locked(con, exclude_admin_id=admin_id) <= 0:
+                    raise MerchantError("last_owner", "不能禁用最后一个 active owner", 409)
+                con.execute("UPDATE merchant_admins SET status=?,updated_at=? WHERE id=?", (status, iso(), admin_id))
+                if status != "active":
+                    con.execute("DELETE FROM admin_sessions WHERE admin_id=?", (admin_id,))
+                self._log_admin_action_locked(con, actor, "admin_status_update", "admin", admin_id, {"status": status})
+                con.commit()
+            except Exception:
+                con.rollback()
+                raise
+        return self.admin_get_admin(admin_id)
+
+    def admin_reset_admin_password(self, actor: dict[str, Any] | None, admin_id: int, password: str) -> dict[str, Any]:
+        if len(str(password or "")) < 6:
+            raise MerchantError("bad_password", "管理员密码至少 6 位")
+        with self.db.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            try:
+                cur = con.execute("UPDATE merchant_admins SET password_hash=?,updated_at=? WHERE id=?", (hash_password(password), iso(), admin_id))
+                if cur.rowcount == 0:
+                    raise MerchantError("not_found", "管理员不存在", 404)
+                con.execute("DELETE FROM admin_sessions WHERE admin_id=?", (admin_id,))
+                self._log_admin_action_locked(con, actor, "admin_password_reset", "admin", admin_id, {})
+                con.commit()
+            except Exception:
+                con.rollback()
+                raise
+        return {"id": admin_id, "updated": True}
+
+    def admin_delete_admin(self, actor: dict[str, Any] | None, admin_id: int) -> dict[str, Any]:
+        if actor and int(actor.get("id") or 0) == int(admin_id):
+            raise MerchantError("cannot_delete_self", "不能删除当前登录管理员", 409)
+        with self.db.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            try:
+                row = con.execute("SELECT * FROM merchant_admins WHERE id=?", (admin_id,)).fetchone()
+                if not row:
+                    raise MerchantError("not_found", "管理员不存在", 404)
+                if row["role"] == "owner" and row["status"] == "active" and self._active_owner_count_locked(con, exclude_admin_id=admin_id) <= 0:
+                    raise MerchantError("last_owner", "不能删除最后一个 active owner", 409)
+                con.execute("DELETE FROM admin_sessions WHERE admin_id=?", (admin_id,))
+                con.execute("DELETE FROM merchant_admins WHERE id=?", (admin_id,))
+                self._log_admin_action_locked(con, actor, "admin_delete", "admin", admin_id, {"username": row["username"], "role": row["role"]})
+                con.commit()
+            except Exception:
+                con.rollback()
+                raise
+        return {"id": admin_id, "deleted": True}
+
+    def admin_get_admin(self, admin_id: int) -> dict[str, Any]:
+        with self.db.connect() as con:
+            row = con.execute("SELECT * FROM merchant_admins WHERE id=?", (admin_id,)).fetchone()
+            if not row:
+                raise MerchantError("not_found", "管理员不存在", 404)
+            return self._admin_view(row)
+
     @staticmethod
     def _bool_value(value: Any) -> bool:
         if isinstance(value, bool):

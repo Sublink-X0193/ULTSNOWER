@@ -131,3 +131,31 @@ python -m pytest -q
 ```
 
 结果：22 passed。
+
+## 2026-06-01 管理员权限追加审计
+
+### 追加变更
+
+- 新增商户管理员管理 Service/API/UI。
+- 新增 `owner` / `operator` 分权：operator 保留运营只读；owner 才能执行配置、客户余额、卡密、设备直控、手动下单、订单加减时、备份恢复、管理员管理。
+- 禁止降级、禁用、删除最后一个 active owner。
+- 重置密码、禁用、删除管理员会清理其后台 session。
+- 管理员创建、角色修改、状态修改、密码重置、删除全部写入 `admin_audit_logs`。
+
+### 白盒检查
+
+- [x] `/api/admin/admins*` 写接口全部依赖 `current_admin + require_owner_admin`。
+- [x] 系统设置、公告、装备配置、客户/卡密/订单状态变更均补充 owner 权限。
+- [x] operator 可访问只读运营数据，无法提交状态变更。
+- [x] 最后一个 active owner 保护在事务内检查，避免误锁死后台。
+- [x] session 清理覆盖密码重置、禁用、删除，旧 cookie 立即失效。
+- [x] UI 新增“管理员”页和创建/改密/角色/状态/删除控件；非 owner 仅显示只读提示。
+
+### 验证
+
+```text
+python -m compileall -q src tests
+python -m pytest -q
+```
+
+结果：23 passed。

@@ -119,7 +119,7 @@ python -m compileall -q src tests
 python -m pytest -q
 ```
 
-结果：20 个测试全部通过。
+结果：23 个测试全部通过（最新复验见第 7.9 节）。
 
 覆盖新增场景：
 
@@ -128,6 +128,7 @@ python -m pytest -q
 - 首启 `/setup` 配置向导与管理员密码保护。
 - 管理员手动下单、换队、设备 stop 指令。
 - 日维度订单分析输出。
+- 管理员角色管理、operator 只读权限、最后一个 active owner 保护。
 
 ## 6. 后续上线前建议
 
@@ -178,6 +179,58 @@ python -m pytest -q
 - 换队
 
 这些动作仍然只对商户本地持有的 active control session 生效，不跨 session 强制接管。
+
+### 7.6 管理员权限模型补齐
+
+新增后台“管理员”页面与接口：
+
+- `GET /api/admin/admins`
+- `POST /api/admin/admins`
+- `PUT /api/admin/admins/{id}/role`
+- `PUT /api/admin/admins/{id}/status`
+- `PUT /api/admin/admins/{id}/password`
+- `DELETE /api/admin/admins/{id}`
+
+角色定义：
+
+- `owner`：完整管理权限，可修改系统设置、客户余额/密码/状态、生成/删除卡密、设备直控、手动下单、备份恢复、管理员管理。
+- `operator`：只读运营权限，可查看概览、订单、客户、设备、审计、分析报表，不能做状态变更。
+
+保护规则：
+
+- 禁止降级、禁用或删除最后一个 `active owner`。
+- 重置密码、禁用、删除管理员时会清理该管理员后台 session。
+- 管理员创建、角色变更、状态变更、密码重置、删除全部写入审计日志。
+
+### 7.7 Owner-only 变更面收口
+
+以下后台状态变更接口已经加 owner 权限：
+
+- 系统设置、公告、装备配置。
+- 客户创建、余额调整、冻结/解冻、改密码、删除。
+- 充值卡生成/删除。
+- 订单加减时、订单停止。
+- 设备直控、手动下单、换队、备份恢复、Bridge API Key 配置。
+
+### 7.8 在线与统计口径确认
+
+当前在线口径已按要求固定为：
+
+1. 客户登录 token 未过期；或
+2. 客户有活动订单。
+
+登录 token 不做高频心跳，只在客户访问需要认证的接口时低频滑动续期；超时后不再显示 token 在线，但活动订单仍会让客户显示在线。统计信息通过 `customer_activity_events` 持久化，能查询今日登录未下单客户、登录当时订单状态、下单客户数、下单小时数与排行。
+
+### 7.9 最新验证
+
+已执行：
+
+```text
+python -m compileall -q src tests
+python -m pytest -q
+```
+
+结果：23 passed。
 
 ## 8. 2026-06-01 旧版直控/手动下单兼容补强
 
