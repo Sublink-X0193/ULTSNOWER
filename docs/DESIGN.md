@@ -94,3 +94,11 @@ MERCHANT_ADMIN_PASSWORD=admin123456
 - `privacy_mode_enabled`：隐私模式。客户侧订单响应会隐藏队伍码、移除 `fencing_token` 和 `merchant_context_ref`，并可遮罩 control session id。
 - `maintenance_mode_enabled`：维护模式。已存在订单可继续展示/处理，新下单会返回 `maintenance_mode`。
 - `announcement_enabled` / `announcement_text`：公告开关和内容。客户首页展示，`GET /api/public/settings` 返回给前端。
+
+后台管理界面按原服务端的 `topbar + nav-tabs + data-table + badge` 风格重建，包含：
+
+- 今日总览：客户总数、在线客户、活动订单、运行中订单、完成/异常订单、总剩余分钟。
+- 目前在线客户预览：基于未过期 `sessions` 展示在线客户、当前订单、订单剩余时长。
+- 所有客户预览：搜索、创建客户、冻结/解冻、重置密码、修改客户分钟/局数余额。
+- 订单管理：按状态/关键字筛选订单，显示购买时长、剩余时长、设备/session，支持后台加减订单时长与停止订单。
+- 系统设置：公告、隐私模式、维护模式。

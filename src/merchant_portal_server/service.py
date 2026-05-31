@@ -79,6 +79,20 @@ class MerchantService:
     def _new_order_no(self) -> str:
         return "mo_" + utcnow().strftime("%Y%m%d%H%M%S") + "_" + secrets.token_hex(4)
 
+    def _remaining_seconds_from_order(self, order: dict[str, Any]) -> int:
+        end = parse_ts(order.get("end_at"))
+        if not end:
+            return 0
+        return max(0, int((end - utcnow()).total_seconds()))
+
+    def _admin_order_view(self, order: dict[str, Any]) -> dict[str, Any]:
+        out = dict(order)
+        out["remaining_seconds"] = self._remaining_seconds_from_order(out)
+        out["remaining_minutes"] = int(math.ceil(out["remaining_seconds"] / 60.0)) if out["remaining_seconds"] else 0
+        out["binding_status"] = (out.get("binding") or {}).get("status") if isinstance(out.get("binding"), dict) else None
+        out["control_session_id"] = (out.get("binding") or {}).get("control_session_id") if isinstance(out.get("binding"), dict) else None
+        return out
+
     # ---------- auth/customers ----------
     def register_customer(self, username: str, password: str) -> dict[str, Any]:
         username = str(username or "").strip()
@@ -153,6 +167,214 @@ class MerchantService:
             if not row:
                 raise MerchantError("not_found", "客户不存在", 404)
             return self.public_customer(dict(row))
+
+    def admin_overview(self) -> dict[str, Any]:
+        now_s = iso()
+        with self.db.connect() as con:
+            customer_count = int(con.execute("SELECT COUNT(*) AS n FROM customers").fetchone()["n"])
+            online_count = int(con.execute("SELECT COUNT(DISTINCT customer_id) AS n FROM sessions WHERE expires_at>?", (now_s,)).fetchone()["n"])
+            active_order_count = int(
+                con.execute(
+                    f"SELECT COUNT(*) AS n FROM local_orders WHERE status IN ({','.join('?' for _ in ACTIVE_ORDER_STATUSES)})",
+                    tuple(sorted(ACTIVE_ORDER_STATUSES)),
+                ).fetchone()["n"]
+            )
+            running_count = int(con.execute("SELECT COUNT(*) AS n FROM local_orders WHERE status='running'").fetchone()["n"])
+            total_balance_minutes = int(con.execute("SELECT COALESCE(SUM(balance_minutes),0) AS n FROM customers").fetchone()["n"] or 0)
+            finished_count = int(con.execute("SELECT COUNT(*) AS n FROM local_orders WHERE status='finished'").fetchone()["n"])
+            interrupted_count = int(con.execute("SELECT COUNT(*) AS n FROM local_orders WHERE status LIKE 'interrupted_%' OR status='failed'").fetchone()["n"])
+        return {
+            "customer_count": customer_count,
+            "online_count": online_count,
+            "active_order_count": active_order_count,
+            "running_count": running_count,
+            "finished_count": finished_count,
+            "interrupted_count": interrupted_count,
+            "total_balance_minutes": total_balance_minutes,
+            "settings": self.get_settings(),
+        }
+
+    def admin_list_customers(self, *, keyword: str = "", online_only: bool = False, limit: int = 500) -> list[dict[str, Any]]:
+        keyword_l = str(keyword or "").strip().lower()
+        now_s = iso()
+        with self.db.connect() as con:
+            online_rows = con.execute("SELECT customer_id, MAX(created_at) AS last_seen FROM sessions WHERE expires_at>? GROUP BY customer_id", (now_s,)).fetchall()
+            online = {int(r["customer_id"]): r["last_seen"] for r in online_rows}
+            rows = con.execute("SELECT * FROM customers ORDER BY id DESC LIMIT ?", (max(1, min(limit, 2000)),)).fetchall()
+            out: list[dict[str, Any]] = []
+            for r in rows:
+                item = self.public_customer(dict(r))
+                item["created_at"] = r["created_at"]
+                item["updated_at"] = r["updated_at"]
+                item["online"] = int(r["id"]) in online
+                item["last_seen_at"] = online.get(int(r["id"]))
+                active = self._active_order_row(con, int(r["id"]))
+                item["active_order"] = self._admin_order_view(self._order_with_binding(con, int(active["id"]))) if active else None
+                item["active_order_status"] = item["active_order"]["status"] if item["active_order"] else ""
+                item["active_order_remaining_minutes"] = item["active_order"]["remaining_minutes"] if item["active_order"] else 0
+                blob = dumps(item).lower()
+                if online_only and not item["online"]:
+                    continue
+                if keyword_l and keyword_l not in blob:
+                    continue
+                out.append(item)
+            return out
+
+    def admin_create_customer(self, *, username: str, password: str, balance_minutes: int = 0, balance_rounds: int = 0, status: str = "active") -> dict[str, Any]:
+        customer = self.register_customer(username, password)
+        status = status if status in {"active", "frozen"} else "active"
+        with self.db.connect() as con:
+            con.execute(
+                "UPDATE customers SET balance_minutes=?,balance_rounds=?,status=?,updated_at=? WHERE id=?",
+                (max(0, int(balance_minutes or 0)), max(0, int(balance_rounds or 0)), status, iso(), customer["id"]),
+            )
+        return self.get_customer(customer["id"])
+
+    def admin_update_customer_balance(self, customer_id: int, *, balance_minutes: int | None = None, balance_rounds: int | None = None, delta_minutes: int | None = None, delta_rounds: int | None = None) -> dict[str, Any]:
+        with self.db.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            try:
+                row = con.execute("SELECT * FROM customers WHERE id=?", (customer_id,)).fetchone()
+                if not row:
+                    raise MerchantError("not_found", "客户不存在", 404)
+                minutes = int(row["balance_minutes"] or 0)
+                rounds = int(row["balance_rounds"] or 0)
+                if balance_minutes is not None:
+                    minutes = int(balance_minutes)
+                if balance_rounds is not None:
+                    rounds = int(balance_rounds)
+                if delta_minutes is not None:
+                    minutes += int(delta_minutes)
+                if delta_rounds is not None:
+                    rounds += int(delta_rounds)
+                minutes = max(0, minutes)
+                rounds = max(0, rounds)
+                con.execute("UPDATE customers SET balance_minutes=?,balance_rounds=?,updated_at=? WHERE id=?", (minutes, rounds, iso(), customer_id))
+                con.commit()
+            except Exception:
+                con.rollback()
+                raise
+        return self.get_customer(customer_id)
+
+    def admin_set_customer_status(self, customer_id: int, status: str) -> dict[str, Any]:
+        status = str(status or "active")
+        if status not in {"active", "frozen"}:
+            raise MerchantError("bad_status", "客户状态必须是 active 或 frozen")
+        with self.db.connect() as con:
+            cur = con.execute("UPDATE customers SET status=?,updated_at=? WHERE id=?", (status, iso(), customer_id))
+            if cur.rowcount == 0:
+                raise MerchantError("not_found", "客户不存在", 404)
+            if status != "active":
+                con.execute("DELETE FROM sessions WHERE customer_id=?", (customer_id,))
+        return self.get_customer(customer_id)
+
+    def admin_reset_customer_password(self, customer_id: int, password: str) -> dict[str, Any]:
+        if len(str(password or "")) < 4:
+            raise MerchantError("bad_password", "密码至少 4 位")
+        with self.db.connect() as con:
+            cur = con.execute("UPDATE customers SET password_hash=?,updated_at=? WHERE id=?", (hash_password(password), iso(), customer_id))
+            if cur.rowcount == 0:
+                raise MerchantError("not_found", "客户不存在", 404)
+        return {"id": customer_id, "updated": True}
+
+    def admin_delete_customer(self, customer_id: int) -> dict[str, Any]:
+        with self.db.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            try:
+                active = self._active_order_row(con, customer_id)
+                if active:
+                    raise MerchantError("customer_has_active_order", "客户有进行中订单，不能删除", 409)
+                cur = con.execute("DELETE FROM customers WHERE id=?", (customer_id,))
+                if cur.rowcount == 0:
+                    raise MerchantError("not_found", "客户不存在", 404)
+                con.commit()
+            except Exception:
+                con.rollback()
+                raise
+        return {"id": customer_id, "deleted": True}
+
+    def admin_list_orders(self, *, keyword: str = "", status: str = "", customer_id: int | None = None, limit: int = 500) -> list[dict[str, Any]]:
+        keyword_l = str(keyword or "").strip().lower()
+        with self.db.connect() as con:
+            params: list[Any] = []
+            where = "WHERE 1=1"
+            if status:
+                where += " AND o.status=?"
+                params.append(status)
+            if customer_id:
+                where += " AND o.customer_id=?"
+                params.append(int(customer_id))
+            rows = con.execute(
+                f"""SELECT o.*, c.username AS customer_username
+                    FROM local_orders o JOIN customers c ON c.id=o.customer_id
+                    {where}
+                    ORDER BY o.id DESC LIMIT ?""",
+                (*params, max(1, min(limit, 2000))),
+            ).fetchall()
+            out = []
+            for r in rows:
+                item = self._admin_order_view(self._order_with_binding(con, int(r["id"])))
+                item["customer_username"] = r["customer_username"]
+                if keyword_l and keyword_l not in dumps(item).lower():
+                    continue
+                out.append(item)
+            return out
+
+    def admin_get_order(self, order_id: int) -> dict[str, Any]:
+        with self.db.connect() as con:
+            row = con.execute("SELECT o.*, c.username AS customer_username FROM local_orders o JOIN customers c ON c.id=o.customer_id WHERE o.id=?", (order_id,)).fetchone()
+            if not row:
+                raise MerchantError("not_found", "订单不存在", 404)
+            item = self._admin_order_view(self._order_with_binding(con, order_id))
+            item["customer_username"] = row["customer_username"]
+            return item
+
+    def admin_adjust_order_time(self, order_id: int, *, add_minutes: int) -> dict[str, Any]:
+        add_minutes = int(add_minutes or 0)
+        if add_minutes == 0:
+            raise MerchantError("bad_minutes", "调整分钟不能为 0")
+        if abs(add_minutes) > 24 * 60:
+            raise MerchantError("bad_minutes", "单次调整不能超过 24 小时")
+        with self.db.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            try:
+                row = con.execute("SELECT * FROM local_orders WHERE id=?", (order_id,)).fetchone()
+                if not row:
+                    raise MerchantError("not_found", "订单不存在", 404)
+                if row["status"] not in {"waiting_ready_timer", "running", "stopping"}:
+                    raise MerchantError("bad_order_status", "只能调整等待/运行/停止中的订单", 409)
+                requested = max(0, int(row["requested_minutes"] or 0) + add_minutes)
+                end_at = row["end_at"]
+                if row["end_at"]:
+                    end = parse_ts(row["end_at"]) or utcnow()
+                    end_at = iso(max(utcnow(), end + timedelta(minutes=add_minutes)))
+                con.execute("UPDATE local_orders SET requested_minutes=?,end_at=?,updated_at=? WHERE id=?", (requested, end_at, iso(), order_id))
+                con.commit()
+            except Exception:
+                con.rollback()
+                raise
+        return self.admin_get_order(order_id)
+
+    def admin_stop_order(self, order_id: int) -> dict[str, Any]:
+        with self.db.connect() as con:
+            row = con.execute(
+                """SELECT o.*, b.control_session_id, b.fencing_token
+                   FROM local_orders o LEFT JOIN order_control_bindings b ON b.local_order_id=o.id
+                   WHERE o.id=?""",
+                (order_id,),
+            ).fetchone()
+            if not row:
+                raise MerchantError("not_found", "订单不存在", 404)
+            if row["status"] not in ACTIVE_ORDER_STATUSES:
+                raise MerchantError("bad_order_status", "订单不在可停止状态", 409)
+        if row["control_session_id"] and row["fencing_token"] and self.bridge:
+            try:
+                self.bridge.queue_stop(row["control_session_id"], fencing_token=row["fencing_token"], idem=f"admin-stop:{row['local_order_no']}:v1", reason="merchant_admin_stop")
+            except BridgeClientError as e:
+                raise MerchantError(e.code, e.message, e.status_code)
+        with self.db.connect() as con:
+            con.execute("UPDATE local_orders SET status='stopping',fail_reason='admin_stop',updated_at=? WHERE id=?", (iso(), order_id))
+        return self.admin_get_order(order_id)
 
     # ---------- merchant admin / settings ----------
     def ensure_default_admin(self, username: str, password: str) -> None:

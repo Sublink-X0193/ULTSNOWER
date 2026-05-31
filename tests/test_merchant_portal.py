@@ -346,3 +346,40 @@ def test_html_pages_escape_user_controlled_values(app_and_bridge):
     assert "<TAG>" not in current
     assert "&lt;TAG&gt;" in current
     assert "<TAG>" not in history
+
+
+def test_admin_customer_and_order_management_surfaces(app_and_bridge):
+    app, bridge = app_and_bridge
+    admin_client = TestClient(app)
+    assert admin_client.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+
+    created = admin_client.post("/api/admin/customers", json={"username": "managed", "password": "123456", "balance_minutes": 60})
+    assert created.status_code == 200, created.text
+    customer = created.json()["customer"]
+    listed = admin_client.get("/api/admin/customers").json()["customers"]
+    assert any(c["username"] == "managed" and c["balance_minutes"] == 60 for c in listed)
+
+    updated = admin_client.put(f"/api/admin/customers/{customer['id']}/balance", json={"delta_minutes": 30})
+    assert updated.status_code == 200
+    assert updated.json()["customer"]["balance_minutes"] == 90
+
+    user_client = TestClient(app)
+    assert user_client.post("/api/login", json={"username": "managed", "password": "123456"}).status_code == 200
+    online = admin_client.get("/api/admin/customers?online_only=true").json()["customers"]
+    assert any(c["id"] == customer["id"] and c["online"] for c in online)
+
+    order = user_client.post("/api/orders", json={"requested_minutes": 10, "team_code": "MGD123"}).json()["order"]
+    bridge.push_ready(order["binding"]["control_session_id"])
+    user_client.post("/internal/workers/events")
+
+    orders = admin_client.get("/api/admin/orders?status=running").json()["orders"]
+    assert any(o["id"] == order["id"] and o["remaining_minutes"] > 0 for o in orders)
+
+    adjusted = admin_client.post(f"/api/admin/orders/{order['id']}/add-time", json={"add_minutes": 15})
+    assert adjusted.status_code == 200
+    assert adjusted.json()["order"]["requested_minutes"] == 25
+
+    html = admin_client.get("/merchant-admin").text
+    assert "所有客户预览 / 账户管理" in html
+    assert "目前在线客户预览" in html
+    assert "订单管理 / 剩余时长显示修改" in html

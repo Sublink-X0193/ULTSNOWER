@@ -79,8 +79,19 @@ python -m pytest -q
   - 隐私模式：客户侧隐藏队伍码和 control session 细节，不暴露 fencing token。
   - 维护模式：禁止新下单。
   - 公告：展示到客户首页并通过 public settings API 返回。
+- `/merchant-admin` 现在是完整商户后台：
+  - 今日总览：客户数、在线客户、活动订单、运行中订单、剩余分钟池。
+  - 在线客户预览：当前 session 未过期的客户、当前订单、剩余订单时长。
+  - 所有客户预览：创建客户、搜索客户、冻结/解冻、改密码、调分钟/局数余额。
+  - 订单管理：订单列表、剩余时长显示、订单加减时、后台停止订单。
+  - 系统设置：公告、隐私模式、维护模式。
 - `GET /api/public/settings` 客户侧读取维护/公告/隐私状态。
 - `POST /api/admin/login`、`GET/PUT /api/admin/settings` 商户后台 JSON API。
+- `GET /api/admin/customers?online_only=true` 在线客户。
+- `GET/POST /api/admin/customers` 全量客户与新建客户。
+- `PUT /api/admin/customers/{id}/balance` 修改客户剩余分钟/局数。
+- `GET /api/admin/orders` 订单管理。
+- `POST /api/admin/orders/{id}/add-time` 修改运行订单剩余时长。
 
 ## 初始化测试卡密
 
