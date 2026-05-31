@@ -93,6 +93,96 @@ class MerchantService:
             (key, value, iso()),
         )
 
+    def _put_setting_locked(self, con: sqlite3.Connection, key: str, value: Any, admin_id: int | None = None) -> None:
+        con.execute(
+            """INSERT INTO merchant_settings(key,value_json,updated_at,updated_by_admin_id)
+               VALUES(?,?,?,?)
+               ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at,updated_by_admin_id=excluded.updated_by_admin_id""",
+            (key, dumps(value), iso(), admin_id),
+        )
+
+    def _log_admin_action_locked(
+        self,
+        con: sqlite3.Connection,
+        admin: dict[str, Any] | None,
+        action: str,
+        resource_type: str,
+        resource_id: Any = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        con.execute(
+            """INSERT INTO admin_audit_logs(admin_id,admin_username,action,resource_type,resource_id,metadata_json,created_at)
+               VALUES(?,?,?,?,?,?,?)""",
+            (
+                int(admin["id"]) if admin and admin.get("id") is not None else None,
+                str(admin.get("username") or "") if admin else None,
+                action,
+                resource_type,
+                str(resource_id) if resource_id is not None else None,
+                dumps(metadata or {}),
+                iso(),
+            ),
+        )
+
+    def log_admin_action(self, admin: dict[str, Any] | None, action: str, resource_type: str, resource_id: Any = None, metadata: dict[str, Any] | None = None) -> None:
+        with self.db.connect() as con:
+            self._log_admin_action_locked(con, admin, action, resource_type, resource_id, metadata)
+
+    def bridge_config_view(self) -> dict[str, Any]:
+        settings = self.get_settings()
+        with self.db.connect() as con:
+            rows = {r["key"]: loads(r["value_json"], "") for r in con.execute("SELECT key,value_json FROM merchant_settings WHERE key LIKE 'bridge_%'").fetchall()}
+        base_url = str(rows.get("bridge_base_url") or getattr(self.bridge, "base_url", "") or "")
+        merchant_key = str(rows.get("bridge_merchant_key") or getattr(self.bridge, "merchant_key", "") or "")
+        secret = str(rows.get("bridge_merchant_secret") or getattr(self.bridge, "merchant_secret", "") or "")
+        configured = bool(rows.get("bridge_configured")) and bool(base_url and merchant_key and secret)
+        return {
+            "configured": configured,
+            "setup_required": self.bridge_setup_required(),
+            "bridge_base_url": base_url,
+            "bridge_merchant_key": merchant_key,
+            "bridge_merchant_secret_set": bool(secret),
+            "system_name": settings.get("system_name") or "SNOW 自助下单",
+        }
+
+    def bridge_setup_required(self) -> bool:
+        with self.db.connect() as con:
+            rows = {r["key"]: loads(r["value_json"], "") for r in con.execute("SELECT key,value_json FROM merchant_settings WHERE key LIKE 'bridge_%'").fetchall()}
+        configured = bool(rows.get("bridge_configured")) and bool(rows.get("bridge_base_url")) and bool(rows.get("bridge_merchant_key")) and bool(rows.get("bridge_merchant_secret"))
+        if configured:
+            return False
+        key = str(getattr(self.bridge, "merchant_key", "") or "")
+        secret = str(getattr(self.bridge, "merchant_secret", "") or "")
+        # Tests and explicit custom clients should not be blocked; real default
+        # mk_test/secret deployments should show the first-run setup wizard.
+        if self.bridge.__class__.__name__ != "BridgeClient":
+            return False
+        return not (key and secret and (key != "mk_test" or secret != "secret"))
+
+    def update_bridge_config(self, admin: dict[str, Any] | None, *, base_url: str, merchant_key: str, merchant_secret: str) -> dict[str, Any]:
+        base_url = str(base_url or "").strip().rstrip("/")
+        merchant_key = str(merchant_key or "").strip()
+        merchant_secret = str(merchant_secret or "").strip()
+        if not base_url.startswith(("http://", "https://")):
+            raise MerchantError("bad_bridge_url", "中央 Bridge 地址必须以 http:// 或 https:// 开头")
+        if len(merchant_key) < 3 or len(merchant_key) > 128:
+            raise MerchantError("bad_bridge_key", "Merchant Key 长度不合法")
+        if len(merchant_secret) < 6 or len(merchant_secret) > 512:
+            raise MerchantError("bad_bridge_secret", "Merchant Secret 长度不合法")
+        with self.db.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            try:
+                self._put_setting_locked(con, "bridge_base_url", base_url, int(admin["id"]) if admin else None)
+                self._put_setting_locked(con, "bridge_merchant_key", merchant_key, int(admin["id"]) if admin else None)
+                self._put_setting_locked(con, "bridge_merchant_secret", merchant_secret, int(admin["id"]) if admin else None)
+                self._put_setting_locked(con, "bridge_configured", True, int(admin["id"]) if admin else None)
+                self._log_admin_action_locked(con, admin, "bridge_config_update", "bridge", merchant_key, {"base_url": base_url})
+                con.commit()
+            except Exception:
+                con.rollback()
+                raise
+        return self.bridge_config_view()
+
     def _active_order_row(self, con: sqlite3.Connection, customer_id: int) -> sqlite3.Row | None:
         qmarks = ",".join("?" for _ in ACTIVE_ORDER_STATUSES)
         return con.execute(
@@ -165,11 +255,16 @@ class MerchantService:
         now_s = iso()
         expires = iso(utcnow() + timedelta(seconds=self.session_ttl_seconds))
         with self.db.connect() as con:
+            self._cleanup_expired_sessions_locked(con)
             row = con.execute("SELECT * FROM customers WHERE id=? AND status='active'", (customer_id,)).fetchone()
             if not row:
                 raise MerchantError("not_found", "客户不存在", 404)
-            con.execute("INSERT INTO sessions(sid,customer_id,username,expires_at,created_at) VALUES(?,?,?,?,?)", (sid, customer_id, row["username"], expires, now_s))
+            con.execute("INSERT INTO sessions(sid,customer_id,username,expires_at,created_at,last_seen_at) VALUES(?,?,?,?,?,?)", (sid, customer_id, row["username"], expires, now_s, now_s))
         return sid
+
+    def _cleanup_expired_sessions_locked(self, con: sqlite3.Connection) -> int:
+        cur = con.execute("DELETE FROM sessions WHERE expires_at<=?", (iso(),))
+        return int(cur.rowcount or 0)
 
     def delete_session(self, sid: str) -> None:
         if not sid:
@@ -177,16 +272,30 @@ class MerchantService:
         with self.db.connect() as con:
             con.execute("DELETE FROM sessions WHERE sid=?", (sid,))
 
-    def customer_from_session(self, sid: str | None) -> dict[str, Any] | None:
+    def customer_from_session(self, sid: str | None, *, renew: bool = True) -> dict[str, Any] | None:
         if not sid:
             return None
         with self.db.connect() as con:
             row = con.execute(
-                """SELECT c.* FROM sessions s JOIN customers c ON c.id=s.customer_id
+                """SELECT c.*, s.expires_at AS session_expires_at, s.last_seen_at AS session_last_seen_at
+                   FROM sessions s JOIN customers c ON c.id=s.customer_id
                    WHERE s.sid=? AND s.expires_at>? AND c.status='active'""",
                 (sid, iso()),
             ).fetchone()
-            return self.public_customer(dict(row)) if row else None
+            if not row:
+                con.execute("DELETE FROM sessions WHERE sid=? AND expires_at<=?", (sid, iso()))
+                return None
+            item = self.public_customer(dict(row))
+            if renew:
+                now_dt = utcnow()
+                expires_at = parse_ts(row["session_expires_at"])
+                last_seen_at = parse_ts(row["session_last_seen_at"])
+                refresh_seen = (not last_seen_at) or (now_dt - last_seen_at).total_seconds() >= min(600, max(60, self.session_ttl_seconds // 8))
+                refresh_expiry = (not expires_at) or (expires_at - now_dt).total_seconds() <= max(300, self.session_ttl_seconds // 2)
+                if refresh_seen or refresh_expiry:
+                    new_exp = iso(now_dt + timedelta(seconds=self.session_ttl_seconds)) if refresh_expiry else row["session_expires_at"]
+                    con.execute("UPDATE sessions SET last_seen_at=?,expires_at=? WHERE sid=?", (iso(now_dt), new_exp, sid))
+            return item
 
     @staticmethod
     def _mode_balance_columns(mode_or_quality: Any) -> tuple[str, str]:
@@ -238,11 +347,22 @@ class MerchantService:
     def admin_overview(self) -> dict[str, Any]:
         now_s = iso()
         with self.db.connect() as con:
+            self._cleanup_expired_sessions_locked(con)
             customer_count = int(con.execute("SELECT COUNT(*) AS n FROM customers").fetchone()["n"])
-            online_count = int(con.execute("SELECT COUNT(DISTINCT customer_id) AS n FROM sessions WHERE expires_at>?", (now_s,)).fetchone()["n"])
+            active_qmarks = ",".join("?" for _ in ACTIVE_ORDER_STATUSES)
+            online_count = int(
+                con.execute(
+                    f"""SELECT COUNT(DISTINCT customer_id) AS n FROM (
+                            SELECT customer_id FROM sessions WHERE expires_at>?
+                            UNION
+                            SELECT customer_id FROM local_orders WHERE status IN ({active_qmarks})
+                        )""",
+                    (now_s, *sorted(ACTIVE_ORDER_STATUSES)),
+                ).fetchone()["n"]
+            )
             active_order_count = int(
                 con.execute(
-                    f"SELECT COUNT(*) AS n FROM local_orders WHERE status IN ({','.join('?' for _ in ACTIVE_ORDER_STATUSES)})",
+                    f"SELECT COUNT(*) AS n FROM local_orders WHERE status IN ({active_qmarks})",
                     tuple(sorted(ACTIVE_ORDER_STATUSES)),
                 ).fetchone()["n"]
             )
@@ -265,7 +385,8 @@ class MerchantService:
         keyword_l = str(keyword or "").strip().lower()
         now_s = iso()
         with self.db.connect() as con:
-            online_rows = con.execute("SELECT customer_id, MAX(created_at) AS last_seen FROM sessions WHERE expires_at>? GROUP BY customer_id", (now_s,)).fetchall()
+            self._cleanup_expired_sessions_locked(con)
+            online_rows = con.execute("SELECT customer_id, MAX(COALESCE(last_seen_at,created_at)) AS last_seen FROM sessions WHERE expires_at>? GROUP BY customer_id", (now_s,)).fetchall()
             online = {int(r["customer_id"]): r["last_seen"] for r in online_rows}
             rows = con.execute("SELECT * FROM customers ORDER BY id DESC LIMIT ?", (max(1, min(limit, 2000)),)).fetchall()
             out: list[dict[str, Any]] = []
@@ -273,12 +394,22 @@ class MerchantService:
                 item = self.public_customer(dict(r))
                 item["created_at"] = r["created_at"]
                 item["updated_at"] = r["updated_at"]
-                item["online"] = int(r["id"]) in online
-                item["last_seen_at"] = online.get(int(r["id"]))
                 active = self._active_order_row(con, int(r["id"]))
                 item["active_order"] = self._admin_order_view(self._order_with_binding(con, int(active["id"]))) if active else None
                 item["active_order_status"] = item["active_order"]["status"] if item["active_order"] else ""
                 item["active_order_remaining_minutes"] = item["active_order"]["remaining_minutes"] if item["active_order"] else 0
+                token_online = int(r["id"]) in online
+                order_online = bool(item["active_order"])
+                item["online"] = token_online or order_online
+                if token_online and order_online:
+                    item["online_reason"] = "token+order"
+                elif token_online:
+                    item["online_reason"] = "token"
+                elif order_online:
+                    item["online_reason"] = "order"
+                else:
+                    item["online_reason"] = ""
+                item["last_seen_at"] = online.get(int(r["id"])) or (item["active_order"]["updated_at"] if item["active_order"] else None)
                 blob = dumps(item).lower()
                 if online_only and not item["online"]:
                     continue
@@ -286,6 +417,253 @@ class MerchantService:
                     continue
                 out.append(item)
             return out
+
+    def _activity_local_date(self, dt: datetime | None = None) -> str:
+        return (dt or utcnow()).astimezone(LOCAL_TZ).date().isoformat()
+
+    def _record_activity_locked(
+        self,
+        con: sqlite3.Connection,
+        *,
+        event_type: str,
+        customer_id: int,
+        username: str,
+        order: dict[str, Any] | sqlite3.Row | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        order_d = dict(order) if order is not None else {}
+        con.execute(
+            """INSERT INTO customer_activity_events(
+                 event_type, customer_id, username, order_id, order_status, order_quality,
+                 order_minutes, order_rounds, metadata_json, local_date, created_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                event_type,
+                int(customer_id),
+                username,
+                int(order_d["id"]) if order_d.get("id") is not None else None,
+                order_d.get("status") if order_d else "none",
+                order_d.get("quality") if order_d else None,
+                int(order_d.get("requested_minutes") or 0),
+                int(order_d.get("requested_rounds") or 0),
+                dumps(metadata or {}),
+                self._activity_local_date(),
+                iso(),
+            ),
+        )
+
+    def record_customer_login(self, customer_id: int, *, source: str = "login") -> None:
+        with self.db.connect() as con:
+            row = con.execute("SELECT * FROM customers WHERE id=?", (customer_id,)).fetchone()
+            if not row:
+                return
+            active = self._active_order_row(con, customer_id)
+            self._record_activity_locked(
+                con,
+                event_type="login" if source != "night_login" else "night_login",
+                customer_id=customer_id,
+                username=row["username"],
+                order=dict(active) if active else None,
+                metadata={"source": source, "active_order_status_at_login": active["status"] if active else "none"},
+            )
+
+    def _record_order_activity(self, order_id: int, *, event_type: str = "order_created") -> None:
+        with self.db.connect() as con:
+            row = con.execute(
+                """SELECT o.*, c.username
+                   FROM local_orders o JOIN customers c ON c.id=o.customer_id
+                   WHERE o.id=?""",
+                (order_id,),
+            ).fetchone()
+            if not row:
+                return
+            self._record_activity_locked(
+                con,
+                event_type=event_type,
+                customer_id=int(row["customer_id"]),
+                username=row["username"],
+                order=dict(row),
+                metadata={"mode": self._mode_from_quality(row["quality"])},
+            )
+
+    def admin_activity_stats(self, *, local_date: str | None = None) -> dict[str, Any]:
+        day = str(local_date or self._activity_local_date()).strip()[:10]
+        with self.db.connect() as con:
+            login_types = ("login", "night_login")
+            login_customer_count = int(
+                con.execute(
+                    f"SELECT COUNT(DISTINCT customer_id) AS n FROM customer_activity_events WHERE local_date=? AND event_type IN ({','.join('?' for _ in login_types)})",
+                    (day, *login_types),
+                ).fetchone()["n"]
+                or 0
+            )
+            order_customer_count = int(
+                con.execute(
+                    "SELECT COUNT(DISTINCT customer_id) AS n FROM customer_activity_events WHERE local_date=? AND event_type='order_created'",
+                    (day,),
+                ).fetchone()["n"]
+                or 0
+            )
+            order_row = con.execute(
+                """SELECT COUNT(*) AS order_count, COALESCE(SUM(order_minutes),0) AS minutes
+                   FROM customer_activity_events
+                   WHERE local_date=? AND event_type='order_created'""",
+                (day,),
+            ).fetchone()
+            no_order_rows = con.execute(
+                f"""SELECT l.customer_id, l.username, COUNT(*) AS login_count, MAX(l.created_at) AS last_login_at,
+                           COALESCE((SELECT e.order_status
+                                     FROM customer_activity_events e
+                                     WHERE e.local_date=? AND e.customer_id=l.customer_id AND e.event_type IN ({','.join('?' for _ in login_types)})
+                                     ORDER BY e.created_at DESC LIMIT 1), 'none') AS order_status_at_login
+                    FROM customer_activity_events l
+                    WHERE l.local_date=? AND l.event_type IN ({','.join('?' for _ in login_types)})
+                      AND NOT EXISTS (
+                        SELECT 1 FROM customer_activity_events o
+                        WHERE o.local_date=? AND o.customer_id=l.customer_id AND o.event_type='order_created'
+                      )
+                    GROUP BY l.customer_id, l.username
+                    ORDER BY last_login_at DESC
+                    LIMIT 100""",
+                (day, *login_types, day, *login_types, day),
+            ).fetchall()
+            status_rows = con.execute(
+                f"""SELECT COALESCE(order_status,'none') AS status, COUNT(*) AS n
+                    FROM customer_activity_events
+                    WHERE local_date=? AND event_type IN ({','.join('?' for _ in login_types)})
+                    GROUP BY COALESCE(order_status,'none')
+                    ORDER BY n DESC""",
+                (day, *login_types),
+            ).fetchall()
+            order_mode_rows = con.execute(
+                """SELECT COALESCE(order_quality,'standard') AS quality, COUNT(*) AS n, COALESCE(SUM(order_minutes),0) AS minutes
+                   FROM customer_activity_events
+                   WHERE local_date=? AND event_type='order_created'
+                   GROUP BY COALESCE(order_quality,'standard')
+                   ORDER BY n DESC""",
+                (day,),
+            ).fetchall()
+        order_minutes = int(order_row["minutes"] or 0)
+        return {
+            "local_date": day,
+            "login_customer_count": login_customer_count,
+            "login_without_order_count": len(no_order_rows),
+            "order_customer_count": order_customer_count,
+            "order_count": int(order_row["order_count"] or 0),
+            "order_minutes": order_minutes,
+            "order_hours": round(order_minutes / 60.0, 2),
+            "login_status_breakdown": [{"status": r["status"], "count": int(r["n"] or 0)} for r in status_rows],
+            "order_quality_breakdown": [{"quality": r["quality"], "count": int(r["n"] or 0), "minutes": int(r["minutes"] or 0), "hours": round(int(r["minutes"] or 0) / 60.0, 2)} for r in order_mode_rows],
+            "login_without_order_customers": [
+                {
+                    "customer_id": int(r["customer_id"]),
+                    "username": r["username"],
+                    "login_count": int(r["login_count"] or 0),
+                    "last_login_at": r["last_login_at"],
+                    "order_status_at_login": r["order_status_at_login"] or "none",
+                }
+                for r in no_order_rows
+            ],
+        }
+
+    def _analytics_period_bounds(self, *, period: str = "day", anchor: str | None = None) -> tuple[datetime, datetime, str]:
+        period = str(period or "day").lower()
+        if period not in {"day", "week", "month"}:
+            raise MerchantError("bad_period", "period 必须是 day/week/month")
+        try:
+            base_date = datetime.fromisoformat(str(anchor or self._activity_local_date())[:10]).date()
+        except Exception:
+            raise MerchantError("bad_date", "日期格式必须是 YYYY-MM-DD")
+        if period == "week":
+            start_date = base_date - timedelta(days=base_date.weekday())
+            days = 7
+        elif period == "month":
+            start_date = base_date.replace(day=1)
+            next_month = (start_date.replace(day=28) + timedelta(days=4)).replace(day=1)
+            days = (next_month - start_date).days
+        else:
+            start_date = base_date
+            days = 1
+        start_local = datetime.combine(start_date, time.min, tzinfo=LOCAL_TZ)
+        end_local = start_local + timedelta(days=days)
+        return start_local.astimezone(ZoneInfo("UTC")), end_local.astimezone(ZoneInfo("UTC")), start_date.isoformat()
+
+    def admin_order_analytics(self, *, period: str = "day", date: str | None = None) -> dict[str, Any]:
+        start_utc, end_utc, start_label = self._analytics_period_bounds(period=period, anchor=date)
+        start_iso, end_iso = iso(start_utc), iso(end_utc)
+        with self.db.connect() as con:
+            rows = con.execute(
+                """SELECT o.*, c.username AS customer_username
+                   FROM local_orders o JOIN customers c ON c.id=o.customer_id
+                   WHERE o.created_at>=? AND o.created_at<?
+                   ORDER BY o.created_at ASC""",
+                (start_iso, end_iso),
+            ).fetchall()
+        daily: dict[str, dict[str, Any]] = {}
+        status: dict[str, int] = {}
+        quality: dict[str, dict[str, int]] = {}
+        ranks: dict[int, dict[str, Any]] = {}
+        total_minutes = 0
+        completed_minutes = 0
+        failed_orders = 0
+        for r in rows:
+            d = dict(r)
+            created = parse_ts(d.get("created_at")) or utcnow()
+            local_day = created.astimezone(LOCAL_TZ).date().isoformat()
+            bucket = daily.setdefault(local_day, {"date": local_day, "order_count": 0, "customer_ids": set(), "minutes": 0, "hours": 0.0})
+            minutes = int(d.get("requested_minutes") or 0)
+            total_minutes += minutes
+            bucket["order_count"] += 1
+            bucket["customer_ids"].add(int(d["customer_id"]))
+            bucket["minutes"] += minutes
+            st = str(d.get("status") or "unknown")
+            status[st] = status.get(st, 0) + 1
+            if st in {"failed", "interrupted_by_admin", "interrupted_by_disconnect"}:
+                failed_orders += 1
+            if st == "finished":
+                completed_minutes += minutes
+            q = str(d.get("quality") or "standard")
+            qrow = quality.setdefault(q, {"order_count": 0, "minutes": 0})
+            qrow["order_count"] += 1
+            qrow["minutes"] += minutes
+            cid = int(d["customer_id"])
+            rank = ranks.setdefault(cid, {"customer_id": cid, "username": d.get("customer_username") or cid, "order_count": 0, "minutes": 0})
+            rank["order_count"] += 1
+            rank["minutes"] += minutes
+        daily_series = []
+        day_count = max(1, (end_utc.astimezone(LOCAL_TZ).date() - start_utc.astimezone(LOCAL_TZ).date()).days)
+        first_local = start_utc.astimezone(LOCAL_TZ).date()
+        for i in range(day_count):
+            label = (first_local + timedelta(days=i)).isoformat()
+            b = daily.get(label, {"date": label, "order_count": 0, "customer_ids": set(), "minutes": 0})
+            minutes = int(b["minutes"] or 0)
+            daily_series.append({
+                "date": label,
+                "order_count": int(b["order_count"] or 0),
+                "customer_count": len(b["customer_ids"]),
+                "minutes": minutes,
+                "hours": round(minutes / 60.0, 2),
+            })
+        rank_rows = sorted(ranks.values(), key=lambda x: (-int(x["minutes"]), -int(x["order_count"]), str(x["username"])))[:50]
+        for r in rank_rows:
+            r["hours"] = round(int(r["minutes"]) / 60.0, 2)
+        return {
+            "period": period,
+            "date": date or self._activity_local_date(),
+            "start_date": start_label,
+            "end_date": (end_utc.astimezone(LOCAL_TZ).date() - timedelta(days=1)).isoformat(),
+            "order_count": len(rows),
+            "customer_count": len({int(r["customer_id"]) for r in rows}),
+            "requested_minutes": total_minutes,
+            "requested_hours": round(total_minutes / 60.0, 2),
+            "completed_minutes": completed_minutes,
+            "completed_hours": round(completed_minutes / 60.0, 2),
+            "failed_order_count": failed_orders,
+            "daily_series": daily_series,
+            "status_breakdown": [{"status": k, "count": v} for k, v in sorted(status.items(), key=lambda x: (-x[1], x[0]))],
+            "quality_breakdown": [{"quality": k, "order_count": v["order_count"], "minutes": v["minutes"], "hours": round(v["minutes"] / 60.0, 2)} for k, v in sorted(quality.items(), key=lambda x: (-x[1]["minutes"], x[0]))],
+            "customer_rank": rank_rows,
+        }
 
     def admin_create_customer(self, *, username: str, password: str, balance_minutes: int = 0, balance_rounds: int = 0, status: str = "active") -> dict[str, Any]:
         customer = self.register_customer(username, password)
@@ -462,6 +840,258 @@ class MerchantService:
         with self.db.connect() as con:
             con.execute("UPDATE local_orders SET status='stopping',fail_reason='admin_stop',updated_at=? WHERE id=?", (iso(), order_id))
         return self.admin_get_order(order_id)
+
+    def _ensure_manual_customer_locked(self, con: sqlite3.Connection, device_id: int) -> int:
+        username = f"admin_manual_device_{int(device_id)}"
+        row = con.execute("SELECT id FROM customers WHERE username=?", (username,)).fetchone()
+        if row:
+            return int(row["id"])
+        now_s = iso()
+        cur = con.execute(
+            """INSERT INTO customers(username,password_hash,balance_minutes,balance_rounds,
+                       balance_machine_minutes,balance_machine_rounds,balance_absolute_minutes,balance_absolute_rounds,
+                       status,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (username, hash_password(secrets.token_urlsafe(16)), 0, 0, 0, 0, 0, 0, "active", now_s, now_s),
+        )
+        return int(cur.lastrowid)
+
+    def _active_order_by_device_locked(self, con: sqlite3.Connection, device_id: int) -> sqlite3.Row | None:
+        qmarks = ",".join("?" for _ in ACTIVE_ORDER_STATUSES)
+        return con.execute(
+            f"""SELECT o.*, b.control_session_id, b.fencing_token, b.last_device_epoch, b.id AS binding_id
+                FROM local_orders o JOIN order_control_bindings b ON b.local_order_id=o.id
+                WHERE b.device_id=? AND o.status IN ({qmarks})
+                ORDER BY o.id DESC LIMIT 1""",
+            (int(device_id), *sorted(ACTIVE_ORDER_STATUSES)),
+        ).fetchone()
+
+    def admin_list_devices(self) -> list[dict[str, Any]]:
+        bridge_devices: list[dict[str, Any]] = []
+        if hasattr(self.bridge, "list_devices"):
+            try:
+                bridge_devices = [dict(d) for d in self.bridge.list_devices()]
+            except BridgeClientError:
+                bridge_devices = []
+        if not bridge_devices and hasattr(self.bridge, "get_capacity"):
+            try:
+                cap = self.bridge.get_capacity()
+                bridge_devices = [
+                    {"id": int(did), "device_id": int(did), "display_name": f"{did}号机", "online": True, "control_state": "idle", "agent_state": "idle"}
+                    for did in (cap.get("idle_device_ids") or [])
+                ]
+            except Exception:
+                bridge_devices = []
+        with self.db.connect() as con:
+            qmarks = ",".join("?" for _ in ACTIVE_ORDER_STATUSES)
+            rows = con.execute(
+                f"""SELECT o.*, c.username AS customer_username, b.device_id, b.control_session_id, b.last_device_epoch
+                    FROM local_orders o
+                    JOIN order_control_bindings b ON b.local_order_id=o.id
+                    JOIN customers c ON c.id=o.customer_id
+                    WHERE o.status IN ({qmarks})
+                    ORDER BY o.id DESC""",
+                tuple(sorted(ACTIVE_ORDER_STATUSES)),
+            ).fetchall()
+            active_by_device = {int(r["device_id"]): dict(r) for r in rows}
+        seen: set[int] = set()
+        out: list[dict[str, Any]] = []
+        for d in bridge_devices:
+            did = int(d.get("id") or d.get("device_id") or 0)
+            if not did:
+                continue
+            seen.add(did)
+            active = active_by_device.get(did)
+            item = {
+                **d,
+                "id": did,
+                "device_id": did,
+                "device_name": d.get("display_name") or d.get("device_name") or f"{did}号机",
+                "online": bool(d.get("online", True)),
+                "control_state": d.get("control_state") or d.get("state") or ("busy" if active else "idle"),
+                "agent_state": d.get("agent_state") or d.get("ui_state") or "",
+                "ui_state": d.get("ui_state") or "",
+                "active_order": self._admin_order_view(active) if active else None,
+                "active_customer": active.get("customer_username") if active else "",
+            }
+            out.append(item)
+        for did, active in active_by_device.items():
+            if did in seen:
+                continue
+            out.append({
+                "id": did,
+                "device_id": did,
+                "device_name": f"{did}号机",
+                "online": True,
+                "control_state": "busy",
+                "agent_state": "",
+                "ui_state": "",
+                "active_order": self._admin_order_view(active),
+                "active_customer": active.get("customer_username") or "",
+            })
+        out.sort(key=lambda x: int(x.get("id") or 0))
+        return out
+
+    def admin_manual_order(
+        self,
+        admin: dict[str, Any] | None,
+        *,
+        device_id: int,
+        requested_minutes: int,
+        team_code: str,
+        quality: str = "standard",
+        requested_rounds: int = 0,
+    ) -> dict[str, Any]:
+        device_id = int(device_id or 0)
+        requested_minutes = int(requested_minutes or 0)
+        requested_rounds = max(0, int(requested_rounds or 0))
+        team_code = str(team_code or "").strip().upper()
+        quality = str(quality or "standard").strip() or "standard"
+        if device_id <= 0:
+            raise MerchantError("bad_device", "请选择设备")
+        if requested_minutes <= 0 or requested_minutes > 24 * 60:
+            raise MerchantError("bad_minutes", "手动下单分钟数不合法")
+        if not (3 <= len(team_code) <= 32):
+            raise MerchantError("bad_team_code", "队伍码长度不合法")
+        now_s = iso()
+        with self.db.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            try:
+                if self._active_order_by_device_locked(con, device_id):
+                    raise MerchantError("device_has_active_order", "该设备已有商户本地进行中订单", 409)
+                customer_id = self._ensure_manual_customer_locked(con, device_id)
+                active = self._active_order_row(con, customer_id)
+                if active:
+                    raise MerchantError("manual_device_has_active_order", "该设备手动订单尚未结束", 409)
+                order_no = self._new_order_no()
+                cur = con.execute(
+                    """INSERT INTO local_orders(customer_id,status,local_order_no,requested_minutes,requested_rounds,team_code,quality,amount_cents,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                    (customer_id, "claiming_device", order_no, requested_minutes, requested_rounds, team_code, quality, 0, now_s, now_s),
+                )
+                order_id = int(cur.lastrowid)
+                self._log_admin_action_locked(con, admin, "manual_order_create", "device", device_id, {"order_id": order_id, "minutes": requested_minutes, "team_code": team_code, "quality": quality})
+                con.commit()
+            except Exception:
+                con.rollback()
+                raise
+        merchant_context_ref = opaque_merchant_ref(order_no, self.merchant_ref_secret)
+        settings = self.get_settings()
+        try:
+            sess = self.bridge.create_control_session(
+                merchant_context_ref=merchant_context_ref,
+                idem=f"admin-manual-claim:{order_no}",
+                device_id=device_id,
+                auto_assign=False,
+                selection_policy=self._bridge_selection_policy(settings, quality),
+                purpose="admin_manual_order",
+                expected_device_state="idle",
+                takeover_policy="reject",
+            )
+            with self.db.connect() as con:
+                con.execute("BEGIN IMMEDIATE")
+                con.execute("UPDATE local_orders SET status='device_claimed',updated_at=? WHERE id=?", (iso(), order_id))
+                con.execute(
+                    """INSERT INTO order_control_bindings(local_order_id,control_session_id,fencing_token,device_id,merchant_context_ref,last_device_epoch,status,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?)""",
+                    (order_id, sess["control_session_id"], sess["fencing_token"], int(sess["device_id"]), merchant_context_ref, int(sess.get("device_epoch") or 0), "active", iso(), iso()),
+                )
+                con.commit()
+            bundle = self.bridge.queue_command_bundle(
+                sess["control_session_id"],
+                fencing_token=sess["fencing_token"],
+                expected_device_epoch=int(sess.get("device_epoch") or 0),
+                team_code=team_code,
+                quality=quality,
+                idem=f"admin-manual-bundle:{order_no}:v1",
+                ace_enabled=bool(settings.get("ace_enabled")),
+            )
+            commands = bundle.get("commands") or []
+            last_command_id = commands[-1].get("command_id") if commands else None
+            with self.db.connect() as con:
+                con.execute("BEGIN IMMEDIATE")
+                con.execute("UPDATE local_orders SET status='waiting_ready_timer',updated_at=? WHERE id=?", (iso(), order_id))
+                con.execute("UPDATE order_control_bindings SET last_command_id=?,updated_at=? WHERE local_order_id=?", (last_command_id, iso(), order_id))
+                con.commit()
+            self._record_order_activity(order_id, event_type="admin_manual_order")
+            return self.admin_get_order(order_id)
+        except BridgeClientError as e:
+            with self.db.connect() as con:
+                con.execute("BEGIN IMMEDIATE")
+                con.execute("UPDATE local_orders SET status='failed',fail_reason=?,finished_at=?,updated_at=? WHERE id=?", (f"bridge:{e.code}:{e.message}"[:500], iso(), iso(), order_id))
+                self._log_admin_action_locked(con, admin, "manual_order_failed", "device", device_id, {"order_id": order_id, "error": e.code, "message": e.message})
+                con.commit()
+            self._record_order_activity(order_id, event_type="admin_manual_order")
+            raise MerchantError(e.code, e.message, e.status_code)
+
+    def admin_rejoin_order(self, admin: dict[str, Any] | None, order_id: int, team_code: str) -> dict[str, Any]:
+        team_code = str(team_code or "").strip().upper()
+        if team_code and not (3 <= len(team_code) <= 32):
+            raise MerchantError("bad_team_code", "队伍码长度不合法")
+        with self.db.connect() as con:
+            row = con.execute(
+                """SELECT o.*, b.control_session_id, b.fencing_token, b.last_device_epoch
+                   FROM local_orders o LEFT JOIN order_control_bindings b ON b.local_order_id=o.id
+                   WHERE o.id=?""",
+                (order_id,),
+            ).fetchone()
+            if not row:
+                raise MerchantError("not_found", "订单不存在", 404)
+            if row["status"] not in ACTIVE_ORDER_STATUSES:
+                raise MerchantError("bad_order_status", "订单不在可换队状态", 409)
+        if team_code and row["control_session_id"] and row["fencing_token"] and hasattr(self.bridge, "queue_command"):
+            try:
+                self.bridge.queue_command(
+                    row["control_session_id"],
+                    fencing_token=row["fencing_token"],
+                    action="enter_team",
+                    params={"team_code": team_code, "clear_existing": True, "operator": "merchant_admin"},
+                    expected_device_epoch=int(row["last_device_epoch"] or 0),
+                    idem=f"admin-rejoin:{row['local_order_no']}:{team_code}",
+                )
+            except BridgeClientError as e:
+                raise MerchantError(e.code, e.message, e.status_code)
+        if team_code:
+            with self.db.connect() as con:
+                con.execute("BEGIN IMMEDIATE")
+                con.execute("UPDATE local_orders SET team_code=?,updated_at=? WHERE id=?", (team_code, iso(), order_id))
+                self._log_admin_action_locked(con, admin, "manual_rejoin", "order", order_id, {"team_code": team_code})
+                con.commit()
+        return self.admin_get_order(order_id)
+
+    def admin_device_command(self, admin: dict[str, Any] | None, device_id: int, *, action: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        action = str(action or "").strip()
+        allowed = {"stop_current", "enter_team", "ready", "watch", "set_loadout", "restart_backup", "switch_spectate", "cleanup"}
+        if action not in allowed:
+            raise MerchantError("bad_command", "不允许的设备指令")
+        with self.db.connect() as con:
+            row = self._active_order_by_device_locked(con, int(device_id))
+            if not row:
+                raise MerchantError("no_active_control_session", "该设备没有商户本地活动控制会话；空闲设备请使用手动下单", 409)
+        try:
+            if action == "stop_current":
+                cmd = self.bridge.queue_stop(row["control_session_id"], fencing_token=row["fencing_token"], idem=f"admin-device-stop:{row['local_order_no']}:v1", reason="merchant_admin_device_stop")
+                with self.db.connect() as con:
+                    con.execute("BEGIN IMMEDIATE")
+                    con.execute("UPDATE local_orders SET status='stopping',fail_reason='admin_device_stop',updated_at=? WHERE id=?", (iso(), int(row["id"])))
+                    self._log_admin_action_locked(con, admin, "device_command", "device", device_id, {"action": action, "order_id": int(row["id"])})
+                    con.commit()
+                return {"command": cmd, "order": self.admin_get_order(int(row["id"]))}
+            cmd = self.bridge.queue_command(
+                row["control_session_id"],
+                fencing_token=row["fencing_token"],
+                action=action,
+                params=params or {},
+                expected_device_epoch=int(row["last_device_epoch"] or 0),
+                idem=f"admin-device-cmd:{row['local_order_no']}:{action}:{secrets.token_hex(4)}",
+            )
+            with self.db.connect() as con:
+                con.execute("BEGIN IMMEDIATE")
+                self._log_admin_action_locked(con, admin, "device_command", "device", device_id, {"action": action, "order_id": int(row["id"])})
+                con.commit()
+            return {"command": cmd, "order": self.admin_get_order(int(row["id"]))}
+        except BridgeClientError as e:
+            raise MerchantError(e.code, e.message, e.status_code)
 
     def assert_customer_order(self, order_id: int, customer_id: int) -> dict[str, Any]:
         with self.db.connect() as con:
@@ -1175,6 +1805,7 @@ class MerchantService:
                         (scope, idempotency_key, payload_hash, dumps(result), iso()),
                     )
                 con.commit()
+                self._record_order_activity(order_id)
                 return result
         except BridgeClientError as e:
             self._fail_and_refund_new_order(order_id, f"bridge:{e.code}:{e.message}")
@@ -1185,7 +1816,8 @@ class MerchantService:
                         "INSERT OR REPLACE INTO idempotency_keys(scope,idempotency_key,request_hash,response_json,created_at) VALUES(?,?,?,?,?)",
                         (scope, idempotency_key, payload_hash, dumps(result), iso()),
                     )
-                return result
+            self._record_order_activity(order_id)
+            return result
 
     def _fail_and_refund_new_order(self, order_id: int, reason: str) -> None:
         with self.db.connect() as con:

@@ -68,14 +68,30 @@ class BridgeClient:
     def get_capacity(self) -> dict[str, Any]:
         return self.request("GET", "/api/merchant/v1/capacity")
 
-    def create_control_session(self, *, merchant_context_ref: str, idem: str, device_id: int | None = None, auto_assign: bool = True, technical_lease_ttl_seconds: int = 180, selection_policy: dict[str, Any] | None = None) -> dict[str, Any]:
+    def list_devices(self) -> list[dict[str, Any]]:
+        data = self.request("GET", "/api/merchant/v1/devices")
+        return data.get("devices") or []
+
+    def create_control_session(
+        self,
+        *,
+        merchant_context_ref: str,
+        idem: str,
+        device_id: int | None = None,
+        auto_assign: bool = True,
+        technical_lease_ttl_seconds: int = 180,
+        selection_policy: dict[str, Any] | None = None,
+        purpose: str = "customer_control",
+        expected_device_state: str = "idle",
+        takeover_policy: str = "reject",
+    ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "auto_assign": auto_assign,
             "merchant_context_ref": merchant_context_ref,
-            "purpose": "customer_control",
+            "purpose": purpose,
             "technical_lease_ttl_seconds": technical_lease_ttl_seconds,
-            "expected_device_state": "idle",
-            "takeover_policy": "reject",
+            "expected_device_state": expected_device_state,
+            "takeover_policy": takeover_policy,
         }
         if selection_policy:
             body["selection_policy"] = selection_policy

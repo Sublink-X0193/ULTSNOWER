@@ -47,7 +47,19 @@ class FakeBridge:
             n = len(self.idle)
             return {"ok": True, "available": bool(n), "capacity_label": "many" if n >= 3 else ("few" if n else "full"), "idle_device_ids": list(self.idle)}
 
-    def create_control_session(self, *, merchant_context_ref: str, idem: str, device_id: int | None = None, auto_assign: bool = True, technical_lease_ttl_seconds: int = 180, selection_policy: dict[str, Any] | None = None) -> dict[str, Any]:
+    def create_control_session(
+        self,
+        *,
+        merchant_context_ref: str,
+        idem: str,
+        device_id: int | None = None,
+        auto_assign: bool = True,
+        technical_lease_ttl_seconds: int = 180,
+        selection_policy: dict[str, Any] | None = None,
+        purpose: str = "customer_control",
+        expected_device_state: str = "idle",
+        takeover_policy: str = "reject",
+    ) -> dict[str, Any]:
         with self.lock:
             self.session_requests.append({
                 "merchant_context_ref": merchant_context_ref,
@@ -56,10 +68,19 @@ class FakeBridge:
                 "auto_assign": auto_assign,
                 "technical_lease_ttl_seconds": technical_lease_ttl_seconds,
                 "selection_policy": dict(selection_policy or {}),
+                "purpose": purpose,
+                "expected_device_state": expected_device_state,
+                "takeover_policy": takeover_policy,
             })
             if not self.idle:
                 raise BridgeClientError("device_not_available", "没有可用设备", 409)
-            did = self.idle.pop(0)
+            if device_id is not None:
+                if int(device_id) not in self.idle:
+                    raise BridgeClientError("device_not_available", "没有可用设备", 409)
+                self.idle.remove(int(device_id))
+                did = int(device_id)
+            else:
+                did = self.idle.pop(0)
             sid = f"cs_{len(self.sessions)+1}"
             sess = {"control_session_id": sid, "device_id": did, "fencing_token": f"ft_{sid}", "status": "active", "device_epoch": 1, "merchant_context_ref": merchant_context_ref}
             self.sessions[sid] = sess
@@ -649,3 +670,97 @@ def test_legacy_customer_login_portal_and_api_compatibility(app_and_bridge):
     stopped = client.post(f"/api/order/{order_id}/stop")
     assert stopped.status_code == 200, stopped.text
     assert bridge.commands[-1]["action"] == "stop_current"
+
+
+def test_customer_online_uses_token_or_active_order_and_records_activity(app_and_bridge):
+    app, bridge = app_and_bridge
+    admin = TestClient(app)
+    assert admin.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+    created = admin.post("/api/admin/customers", json={"username": "presence", "password": "123456", "balance_minutes": 60})
+    customer = created.json()["customer"]
+
+    user = TestClient(app)
+    assert user.post("/api/login", json={"username": "presence", "password": "123456"}).status_code == 200
+    with app.state.db.connect() as con:
+        sid_row = con.execute("SELECT sid,expires_at FROM sessions WHERE customer_id=?", (customer["id"],)).fetchone()
+        old_exp = sid_row["expires_at"]
+        con.execute(
+            "UPDATE sessions SET expires_at=?,last_seen_at=? WHERE sid=?",
+            (iso(utcnow() + timedelta(seconds=60)), iso(utcnow() - timedelta(hours=2)), sid_row["sid"]),
+        )
+    assert user.get("/api/me").status_code == 200
+    with app.state.db.connect() as con:
+        renewed = con.execute("SELECT expires_at,last_seen_at FROM sessions WHERE sid=?", (sid_row["sid"],)).fetchone()
+    assert renewed["expires_at"] > old_exp
+
+    online = admin.get("/api/admin/customers?online_only=true").json()["customers"]
+    assert any(c["id"] == customer["id"] and c["online"] and "token" in c["online_reason"] for c in online)
+
+    order = user.post("/api/orders", json={"requested_minutes": 10, "team_code": "PRS123"}).json()["order"]
+    bridge.push_ready(order["binding"]["control_session_id"])
+    user.post("/internal/workers/events")
+    with app.state.db.connect() as con:
+        con.execute("UPDATE sessions SET expires_at=? WHERE customer_id=?", (iso(utcnow() - timedelta(seconds=1)), customer["id"]))
+    online2 = admin.get("/api/admin/customers?online_only=true").json()["customers"]
+    row = next(c for c in online2 if c["id"] == customer["id"])
+    assert row["online"] is True
+    assert row["online_reason"] == "order"
+
+    stats = admin.get("/api/admin/activity-stats").json()["stats"]
+    assert stats["login_customer_count"] == 1
+    assert stats["order_customer_count"] == 1
+    assert stats["order_minutes"] == 10
+
+
+def test_setup_wizard_bridge_config_requires_admin_password(tmp_path):
+    app = create_app(db_path=tmp_path / "setup.sqlite")
+    client = TestClient(app)
+    login = client.get("/merchant-admin/login", follow_redirects=False)
+    assert login.status_code == 303
+    assert login.headers["location"] == "/setup"
+    setup_html = client.get("/setup").text
+    assert "首次配置 Bridge API Key" in setup_html
+    bad = client.post(
+        "/api/setup/bridge",
+        json={"admin_username": "admin", "admin_password": "bad", "bridge_base_url": "http://127.0.0.1:8010", "bridge_merchant_key": "mk_live", "bridge_merchant_secret": "secret-live"},
+    )
+    assert bad.status_code == 401
+    ok = client.post(
+        "/api/setup/bridge",
+        json={"admin_username": "admin", "admin_password": "admin123456", "bridge_base_url": "http://127.0.0.1:8010", "bridge_merchant_key": "mk_live", "bridge_merchant_secret": "secret-live"},
+    )
+    assert ok.status_code == 200, ok.text
+    status = client.get("/api/setup/status").json()
+    assert status["configured"] is True
+    assert status["setup_required"] is False
+    assert status["bridge_merchant_secret_set"] is True
+
+
+def test_admin_order_analytics_devices_and_manual_order(app_and_bridge):
+    app, bridge = app_and_bridge
+    admin = TestClient(app)
+    assert admin.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+
+    devices = admin.get("/api/admin/devices").json()["devices"]
+    assert any(d["id"] == 1 for d in devices)
+
+    manual = admin.post("/api/admin/manual-order", json={"device_id": 1, "boss_name": "ADM123", "run_minutes": 30, "selected_mode": "machine"})
+    assert manual.status_code == 200, manual.text
+    order = manual.json()["order"]
+    assert order["status"] == "waiting_ready_timer"
+    assert bridge.session_requests[-1]["device_id"] == 1
+    assert bridge.session_requests[-1]["purpose"] == "admin_manual_order"
+
+    rejoin = admin.post(f"/api/admin/manual-rejoin/{order['id']}", json={"boss_name": "ADM456"})
+    assert rejoin.status_code == 200, rejoin.text
+    assert rejoin.json()["order"]["team_code"] == "ADM456"
+
+    stop = admin.post("/api/admin/devices/1/command", json={"action": "stop_current"})
+    assert stop.status_code == 200, stop.text
+    assert bridge.commands[-1]["action"] == "stop_current"
+
+    analytics = admin.get("/api/admin/order-analytics?period=day").json()["analytics"]
+    assert analytics["order_count"] >= 1
+    assert analytics["requested_minutes"] >= 30
+    assert analytics["daily_series"]
+    assert analytics["customer_rank"]

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
 
 
 def utcnow() -> datetime:
@@ -101,6 +101,12 @@ class Database:
                      AND balance_absolute_minutes=0
                      AND (balance_minutes<>0 OR balance_rounds<>0)"""
             )
+        session_cols = {r["name"] for r in con.execute("PRAGMA table_info(sessions)").fetchall()}
+        if "last_seen_at" not in session_cols:
+            con.execute("ALTER TABLE sessions ADD COLUMN last_seen_at TEXT")
+            con.execute("UPDATE sessions SET last_seen_at=created_at WHERE last_seen_at IS NULL")
+        # Index/table creation is idempotent in SCHEMA_SQL; keep migrations
+        # column-only so older SQLite files can be opened safely.
 
 
 SCHEMA_SQL = """
@@ -125,9 +131,11 @@ CREATE TABLE IF NOT EXISTS sessions (
   username TEXT NOT NULL,
   expires_at TEXT NOT NULL,
   created_at TEXT NOT NULL,
+  last_seen_at TEXT,
   FOREIGN KEY(customer_id) REFERENCES customers(id)
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_customer ON sessions(customer_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 
 CREATE TABLE IF NOT EXISTS merchant_admins (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -180,6 +188,8 @@ CREATE TABLE IF NOT EXISTS local_orders (
 );
 CREATE INDEX IF NOT EXISTS idx_local_orders_customer_id ON local_orders(customer_id, id);
 CREATE INDEX IF NOT EXISTS idx_local_orders_status_end ON local_orders(status, end_at);
+CREATE INDEX IF NOT EXISTS idx_local_orders_created_at ON local_orders(created_at);
+CREATE INDEX IF NOT EXISTS idx_local_orders_customer_created ON local_orders(customer_id, created_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_one_live_order_per_customer
   ON local_orders(customer_id)
   WHERE status IN ('created','paid','claiming_device','device_claimed','commanding','waiting_ready_timer','running','stopping','refunding');
@@ -200,6 +210,7 @@ CREATE TABLE IF NOT EXISTS order_control_bindings (
   FOREIGN KEY(local_order_id) REFERENCES local_orders(id)
 );
 CREATE INDEX IF NOT EXISTS idx_bindings_session ON order_control_bindings(control_session_id);
+CREATE INDEX IF NOT EXISTS idx_bindings_device_status ON order_control_bindings(device_id,status);
 
 CREATE TABLE IF NOT EXISTS bridge_events (
   event_id TEXT PRIMARY KEY,
@@ -256,6 +267,39 @@ CREATE TABLE IF NOT EXISTS refund_records (
   FOREIGN KEY(local_order_id) REFERENCES local_orders(id),
   FOREIGN KEY(customer_id) REFERENCES customers(id)
 );
+
+CREATE TABLE IF NOT EXISTS customer_activity_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_type TEXT NOT NULL,
+  customer_id INTEGER NOT NULL,
+  username TEXT NOT NULL,
+  order_id INTEGER,
+  order_status TEXT,
+  order_quality TEXT,
+  order_minutes INTEGER NOT NULL DEFAULT 0,
+  order_rounds INTEGER NOT NULL DEFAULT 0,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  local_date TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(customer_id) REFERENCES customers(id),
+  FOREIGN KEY(order_id) REFERENCES local_orders(id)
+);
+CREATE INDEX IF NOT EXISTS idx_customer_activity_date_type ON customer_activity_events(local_date,event_type);
+CREATE INDEX IF NOT EXISTS idx_customer_activity_customer_date ON customer_activity_events(customer_id,local_date);
+
+CREATE TABLE IF NOT EXISTS admin_audit_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  admin_id INTEGER,
+  admin_username TEXT,
+  action TEXT NOT NULL,
+  resource_type TEXT NOT NULL,
+  resource_id TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(admin_id) REFERENCES merchant_admins(id)
+);
+CREATE INDEX IF NOT EXISTS idx_admin_audit_action_created ON admin_audit_logs(action,created_at);
+CREATE INDEX IF NOT EXISTS idx_admin_audit_admin_created ON admin_audit_logs(admin_id,created_at);
 
 CREATE TABLE IF NOT EXISTS idempotency_keys (
   scope TEXT NOT NULL,

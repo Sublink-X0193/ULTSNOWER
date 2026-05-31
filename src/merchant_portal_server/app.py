@@ -15,7 +15,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from .bridge_client import BridgeClient, BridgeClientError
 from .config import Settings, load_settings
-from .db import Database, parse_ts
+from .db import Database, loads, parse_ts
 from .service import MerchantError, MerchantService
 
 
@@ -27,10 +27,27 @@ def json_fail(code: str, message: str, status_code: int = 400) -> JSONResponse:
     return JSONResponse({"ok": False, "error": code, "message": message, "msg": message}, status_code=status_code)
 
 
+def _stored_bridge_config(db: Database, settings: Settings) -> dict[str, str]:
+    cfg = {
+        "base_url": settings.bridge_base_url,
+        "merchant_key": settings.bridge_merchant_key,
+        "merchant_secret": settings.bridge_merchant_secret,
+    }
+    with db.connect() as con:
+        rows = con.execute("SELECT key,value_json FROM merchant_settings WHERE key IN ('bridge_base_url','bridge_merchant_key','bridge_merchant_secret','bridge_configured')").fetchall()
+    values = {str(r["key"]): loads(r["value_json"], "") for r in rows}
+    if values.get("bridge_configured"):
+        cfg["base_url"] = str(values.get("bridge_base_url") or cfg["base_url"])
+        cfg["merchant_key"] = str(values.get("bridge_merchant_key") or cfg["merchant_key"])
+        cfg["merchant_secret"] = str(values.get("bridge_merchant_secret") or cfg["merchant_secret"])
+    return cfg
+
+
 def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None = None, settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
     db = Database(db_path or settings.db_path)
-    bridge = bridge_client or BridgeClient(settings.bridge_base_url, settings.bridge_merchant_key, settings.bridge_merchant_secret)
+    bridge_cfg = _stored_bridge_config(db, settings)
+    bridge = bridge_client or BridgeClient(bridge_cfg["base_url"], bridge_cfg["merchant_key"], bridge_cfg["merchant_secret"])
     service = MerchantService(db, bridge, merchant_ref_secret=settings.merchant_ref_secret, session_ttl_seconds=settings.session_ttl_seconds)
     service.ensure_default_admin(settings.default_admin_username, settings.default_admin_password)
 
@@ -77,10 +94,13 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     async def bridge_error_handler(_request: Request, exc: BridgeClientError) -> JSONResponse:
         return json_fail(exc.code, exc.message, exc.status_code)
 
-    def current_customer(request: Request) -> dict[str, Any]:
+    def current_customer(request: Request, response: Response) -> dict[str, Any]:
         customer = service.customer_from_session(request.cookies.get("merchant_session"))
         if not customer:
             raise MerchantError("login_required", "请先登录", 401)
+        sid = request.cookies.get("merchant_session")
+        if sid:
+            set_session_cookie(response, sid)
         return customer
 
     def maybe_customer(request: Request) -> dict[str, Any] | None:
@@ -196,6 +216,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     def login_form(username: str = Form(...), password: str = Form(...)) -> RedirectResponse:
         customer = service.authenticate(username, password)
         sid = service.create_session(customer["id"])
+        service.record_customer_login(customer["id"], source="form_login")
         resp = RedirectResponse("/customer", status_code=303)
         set_session_cookie(resp, sid)
         return resp
@@ -238,6 +259,8 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
 
     @app.get("/merchant-admin/login", response_class=HTMLResponse)
     def admin_login_page() -> HTMLResponse:
+        if service.bridge_setup_required():
+            return RedirectResponse("/setup", status_code=303)  # type: ignore[return-value]
         return HTMLResponse(_layout("商户后台登录", _form("/merchant-admin/login", [("username", "管理员"), ("password", "密码", "password")], "登录")))
 
     @app.post("/merchant-admin/login")
@@ -282,6 +305,42 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         )
         return RedirectResponse("/merchant-admin", status_code=303)
 
+    @app.get("/setup", response_class=HTMLResponse)
+    def setup_page(request: Request) -> HTMLResponse:
+        admin = maybe_admin(request)
+        cfg = service.bridge_config_view()
+        if not cfg["setup_required"] and not admin:
+            return RedirectResponse("/merchant-admin/login", status_code=303)  # type: ignore[return-value]
+        return HTMLResponse(_setup_html(cfg, require_admin_password=not bool(admin)))
+
+    @app.get("/api/setup/status")
+    def api_setup_status() -> dict[str, Any]:
+        return json_ok(**service.bridge_config_view())
+
+    @app.post("/api/setup/bridge")
+    def api_setup_bridge(request: Request, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        admin = maybe_admin(request)
+        if not admin:
+            # First-run setup is still guarded by the local admin password so a
+            # random LAN visitor cannot bind the merchant server to their key.
+            admin = service.authenticate_admin(body.get("admin_username") or settings.default_admin_username, body.get("admin_password") or "")
+        cfg = service.update_bridge_config(
+            admin,
+            base_url=body.get("bridge_base_url") or body.get("base_url") or "",
+            merchant_key=body.get("bridge_merchant_key") or body.get("merchant_key") or "",
+            merchant_secret=body.get("bridge_merchant_secret") or body.get("merchant_secret") or "",
+        )
+        if bridge_client is None:
+            try:
+                if hasattr(service.bridge, "close"):
+                    service.bridge.close()
+            except Exception:
+                pass
+            new_bridge = BridgeClient(cfg["bridge_base_url"], cfg["bridge_merchant_key"], body.get("bridge_merchant_secret") or body.get("merchant_secret") or "")
+            service.bridge = new_bridge
+            app.state.bridge = new_bridge
+        return json_ok(msg="Bridge API Key 已保存", bridge=service.bridge_config_view(), redirect="/merchant-admin/login")
+
     # JSON API
     @app.post("/api/register")
     def api_register(request: Request, response: Response, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
@@ -297,6 +356,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     def api_login(response: Response, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
         customer = service.authenticate(body.get("username") or "", body.get("password") or "")
         sid = service.create_session(customer["id"])
+        service.record_customer_login(customer["id"], source="api_login")
         set_session_cookie(response, sid)
         return json_ok(msg="登录成功", redirect="/customer", role="customer", customer=customer)
 
@@ -310,6 +370,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     def api_night_login(response: Response, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
         customer = service.night_login_card(body.get("card_code") or body.get("code") or "")
         sid = service.create_session(customer["id"])
+        service.record_customer_login(customer["id"], source="night_login")
         set_session_cookie(response, sid)
         return json_ok(msg="登录成功", redirect="/customer", role="night_card", customer=customer)
 
@@ -585,6 +646,14 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     def api_admin_overview(_admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
         return json_ok(**service.admin_overview())
 
+    @app.get("/api/admin/activity-stats")
+    def api_admin_activity_stats(date: str = "", _admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        return json_ok(stats=service.admin_activity_stats(local_date=date or None))
+
+    @app.get("/api/admin/order-analytics")
+    def api_admin_order_analytics(period: str = "day", date: str = "", _admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        return json_ok(analytics=service.admin_order_analytics(period=period, date=date or None))
+
     @app.get("/api/admin/customers")
     def api_admin_customers(keyword: str = "", online_only: bool = False, _admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
         customers = service.admin_list_customers(keyword=keyword, online_only=online_only)
@@ -628,6 +697,36 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     def api_admin_orders(keyword: str = "", status: str = "", customer_id: int | None = None, _admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
         orders = service.admin_list_orders(keyword=keyword, status=status, customer_id=customer_id)
         return json_ok(orders=orders, total=len(orders))
+
+    @app.get("/api/admin/devices")
+    def api_admin_devices(_admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        devices = service.admin_list_devices()
+        return json_ok(devices=devices, total=len(devices))
+
+    @app.post("/api/admin/manual-order")
+    def api_admin_manual_order(request: Request, body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        mode = str(body.get("selected_mode") or body.get("mode") or "").strip().lower()
+        quality = body.get("quality") or ("secret" if mode in {"absolute", "secret", "绝密"} else "standard")
+        order = service.admin_manual_order(
+            admin,
+            device_id=int(body.get("device_id") or 0),
+            requested_minutes=int(body.get("run_minutes") or body.get("requested_minutes") or body.get("minutes") or 0),
+            requested_rounds=int(body.get("run_rounds") or body.get("rounds") or body.get("max_rounds") or 0),
+            team_code=body.get("boss_name") or body.get("team_code") or "",
+            quality=quality,
+        )
+        view = _legacy_order_view(order, service.get_settings())
+        return json_ok(msg="手动下单成功", order=order, order_id=order["id"], run_minutes=view["run_minutes"], run_rounds=view["run_rounds"], max_rounds=view["max_rounds"])
+
+    @app.post("/api/admin/manual-rejoin/{order_id}")
+    def api_admin_manual_rejoin(order_id: int, body: dict[str, Any] = Body(default_factory=dict), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        order = service.admin_rejoin_order(admin, order_id, body.get("boss_name") or body.get("team_code") or "")
+        return json_ok(msg="管理员换队指令已下发", order=order)
+
+    @app.post("/api/admin/devices/{device_id}/command")
+    def api_admin_device_command(device_id: int, body: dict[str, Any] = Body(default_factory=dict), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        result = service.admin_device_command(admin, device_id, action=body.get("action") or "", params=body.get("params") if isinstance(body.get("params"), dict) else {})
+        return json_ok(msg="设备指令已下发", **result)
 
     @app.get("/api/admin/orders/{order_id}")
     def api_admin_order_detail(order_id: int, _admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
@@ -692,6 +791,50 @@ def _escape(value: Any) -> str:
 
 def _pre(value: Any) -> str:
     return "<pre>" + _escape(repr(value) if not isinstance(value, str) else value) + "</pre>"
+
+
+def _setup_html(cfg: dict[str, Any], *, require_admin_password: bool = True) -> str:
+    admin_fields = """
+      <label>管理员用户名<input id="adminUsername" value="admin" autocomplete="username"></label>
+      <label>管理员密码<input id="adminPassword" type="password" autocomplete="current-password" placeholder="输入本地管理员密码"></label>
+    """ if require_admin_password else "<div class='hint'>已登录管理员，会直接保存到本地配置。</div>"
+    return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>首次配置 Bridge API Key</title>
+    <style>
+    body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;background:#eef2ff;min-height:100vh;margin:0;display:flex;align-items:center;justify-content:center;color:#111827}}
+    .card{{width:min(560px,94vw);background:#fff;border-radius:18px;box-shadow:0 24px 80px rgba(30,64,175,.18);padding:28px}}
+    h1{{margin:0 0 8px;font-size:22px}} p{{color:#64748b;line-height:1.7}} label{{display:block;font-size:13px;font-weight:700;margin:14px 0 6px;color:#374151}}
+    input{{width:100%;height:42px;border:1px solid #cbd5e1;border-radius:10px;padding:0 12px;font:inherit}}
+    button{{margin-top:18px;width:100%;height:44px;border:0;border-radius:10px;background:#2563eb;color:#fff;font-weight:800;cursor:pointer}}
+    .hint{{font-size:12px;color:#64748b;margin-top:8px;line-height:1.6}} .ok{{background:#ecfdf5;color:#047857;border:1px solid #a7f3d0;padding:10px;border-radius:10px;margin:10px 0}}
+    .err{{background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;padding:10px;border-radius:10px;margin:10px 0}}
+    </style></head><body><div class="card">
+      <h1>{_escape(cfg.get("system_name") or "商户服务器")} · 首次配置</h1>
+      <p>请填入中央 Bridge 分配给本商户的 API Key/Secret。保存后商户服务器才会调用中央设备控制接口；配置会写入本地数据库。</p>
+      <div id="msg"></div>
+      {admin_fields}
+      <label>中央 Bridge 地址<input id="bridgeBaseUrl" value="{_escape(cfg.get("bridge_base_url") or "http://127.0.0.1:8010")}" placeholder="http://127.0.0.1:8010"></label>
+      <label>Merchant Key<input id="bridgeKey" value="{_escape(cfg.get("bridge_merchant_key") if cfg.get("bridge_merchant_key") != "mk_test" else "")}" placeholder="mk_xxx"></label>
+      <label>Merchant Secret<input id="bridgeSecret" type="password" placeholder="中央生成的 Secret"></label>
+      <div class="hint">安全自检：此页面保存后不会在界面回显 Secret；后续修改需要管理员登录。</div>
+      <button onclick="save()">保存并进入后台</button>
+    </div><script>
+    async function save(){{
+      const payload={{
+        admin_username: document.getElementById('adminUsername')?.value || '',
+        admin_password: document.getElementById('adminPassword')?.value || '',
+        bridge_base_url: document.getElementById('bridgeBaseUrl').value.trim(),
+        bridge_merchant_key: document.getElementById('bridgeKey').value.trim(),
+        bridge_merchant_secret: document.getElementById('bridgeSecret').value.trim(),
+      }};
+      const msg=document.getElementById('msg'); msg.className=''; msg.textContent='保存中...';
+      const res=await fetch('/api/setup/bridge',{{method:'POST',headers:{{'Content-Type':'application/json'}},credentials:'same-origin',body:JSON.stringify(payload)}});
+      const data=await res.json().catch(()=>({{ok:false,message:'响应解析失败'}}));
+      if(!res.ok||data.ok===false){{msg.className='err'; msg.textContent=data.message||data.error||'保存失败'; return;}}
+      msg.className='ok'; msg.textContent='保存成功，正在跳转后台登录...';
+      setTimeout(()=>location.href=data.redirect||'/merchant-admin/login',700);
+    }}
+    </script></body></html>"""
 
 
 def _safe_notice_html(value: Any) -> str:
@@ -1184,6 +1327,10 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
     .field textarea { height: 120px; padding: 10px; }
     .field-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
     .info-box { padding: 10px 12px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; color: #1d4ed8; font-size: 13px; line-height: 1.6; }
+    .bar-list { display:flex; flex-direction:column; gap:8px; margin-top:10px; }
+    .bar-row { display:grid; grid-template-columns:110px 1fr 100px; gap:8px; align-items:center; font-size:12px; }
+    .bar-track { height:10px; background:#e5e7eb; border-radius:999px; overflow:hidden; }
+    .bar-fill { height:100%; background:linear-gradient(90deg,#3b82f6,#22c55e); border-radius:999px; min-width:2px; }
     .toast { position: fixed; right: 24px; bottom: 24px; background: #111827; color: #fff; padding: 10px 14px; border-radius: 9px; box-shadow: 0 12px 30px rgba(0,0,0,.22); z-index: 1200; opacity: 0; transform: translateY(8px); transition: all .18s; }
     .toast.show { opacity: 1; transform: none; }
     @media (max-width: 980px) { .stats-grid { grid-template-columns: repeat(2, minmax(0,1fr)); } .content{padding:14px} .data-table{display:block;overflow:auto} .settings-row{grid-template-columns:1fr} }
@@ -1200,7 +1347,9 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
   </div>
   <div class="nav-tabs">
     <div class="nav-tab active" data-tab="overview">今日总览</div>
+    <div class="nav-tab" data-tab="analytics">订单分析</div>
     <div class="nav-tab" data-tab="online">在线客户</div>
+    <div class="nav-tab" data-tab="devices">设备直控</div>
     <div class="nav-tab" data-tab="customers">客户管理</div>
     <div class="nav-tab" data-tab="cards">充值卡</div>
     <div class="nav-tab" data-tab="equipment">装备配置</div>
@@ -1211,15 +1360,35 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
     <div id="tab-overview" class="tab-panel active">
       <div class="section-header"><span class="section-title">运营概览</span><button class="btn-sm btn-primary" onclick="loadAll()">刷新</button></div>
       <div id="overviewCards" class="grid stats-grid"></div>
+      <div class="panel" style="margin-top:14px">
+        <div class="section-header"><span class="section-title">今日登录 / 下单漏斗</span><button class="btn-sm btn-gray" onclick="loadActivityStats()">刷新统计</button></div>
+        <div id="activityStatsPanel"></div>
+      </div>
       <div class="grid" style="grid-template-columns: 1fr 1fr; margin-top:14px">
         <div class="panel"><div class="section-header"><span class="section-title">当前在线客户</span><button class="btn-sm btn-gray" onclick="showTab('online')">查看全部</button></div><div id="overviewOnline"></div></div>
         <div class="panel"><div class="section-header"><span class="section-title">进行中订单</span><button class="btn-sm btn-gray" onclick="showTab('orders')">订单管理</button></div><div id="overviewOrders"></div></div>
       </div>
     </div>
 
+    <div id="tab-analytics" class="tab-panel">
+      <div class="section-header"><span class="section-title">订单分析 / 日周月报表</span><button class="btn-sm btn-primary" onclick="loadOrderAnalytics()">生成报表</button></div>
+      <div class="toolbar">
+        <select id="analyticsPeriod"><option value="day">按日</option><option value="week">按周</option><option value="month">按月</option></select>
+        <input id="analyticsDate" type="date">
+        <button class="btn-sm btn-gray" onclick="loadOrderAnalytics()">刷新</button>
+      </div>
+      <div id="analyticsPanel"></div>
+    </div>
+
     <div id="tab-online" class="tab-panel">
       <div class="section-header"><span class="section-title">目前在线客户预览</span><button class="btn-sm btn-primary" onclick="loadOnline()">刷新在线</button></div>
       <div id="onlineTable"></div>
+    </div>
+
+    <div id="tab-devices" class="tab-panel">
+      <div class="section-header"><span class="section-title">设备直控 / 管理员手动下单</span><button class="btn-sm btn-primary" onclick="loadDevicesAdmin()">刷新设备</button></div>
+      <div class="hint" style="margin-bottom:10px">直控只走中央 Bridge 的 control session + command queue，不绕过 fencing token；空闲设备可手动下单，运行中设备可停止/换队/下发维护指令。</div>
+      <div id="devicesTable"></div>
     </div>
 
     <div id="tab-customers" class="tab-panel">
@@ -1555,6 +1724,39 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
     </div>
   </div>
 
+  <div id="manualOrderModal" class="modal-mask">
+    <div class="modal">
+      <div class="modal-head">管理员手动下单</div>
+      <div class="modal-body">
+        <input id="manualDeviceId" type="hidden">
+        <div class="info-box" id="manualDeviceInfo">--</div>
+        <div class="field"><label>队伍码 / 老板名</label><input id="manualTeamCode" placeholder="例如 ABC1234"></div>
+        <div class="field-row">
+          <div class="field"><label>小时</label><input id="manualHours" type="number" min="0" max="24" value="1"></div>
+          <div class="field"><label>分钟</label><input id="manualMinutes" type="number" min="0" max="59" value="0"></div>
+        </div>
+        <div class="field-row">
+          <div class="field"><label>模式</label><select id="manualMode"><option value="machine">机密</option><option value="absolute">绝密</option></select></div>
+          <div class="field"><label>局数 / 战损</label><input id="manualRounds" type="number" min="0" value="0"></div>
+        </div>
+        <div class="hint">手动下单不扣客户余额，会创建本地管理员订单，收到 ready_for_customer_timer 后一样开始计时。</div>
+      </div>
+      <div class="modal-foot"><button class="btn-sm btn-gray" onclick="closeModal('manualOrderModal')">取消</button><button class="btn-sm btn-green" onclick="submitManualOrder()">确认下单</button></div>
+    </div>
+  </div>
+
+  <div id="adminRejoinModal" class="modal-mask">
+    <div class="modal">
+      <div class="modal-head">管理员换队</div>
+      <div class="modal-body">
+        <input id="rejoinOrderId" type="hidden">
+        <div class="info-box" id="rejoinInfo">--</div>
+        <div class="field"><label>新队伍码</label><input id="rejoinTeamCode" placeholder="例如 NEW1234"></div>
+      </div>
+      <div class="modal-foot"><button class="btn-sm btn-gray" onclick="closeModal('adminRejoinModal')">取消</button><button class="btn-sm btn-primary" onclick="submitAdminRejoin()">下发换队</button></div>
+    </div>
+  </div>
+
   <div id="confirmModal" class="modal-mask">
     <div class="modal">
       <div class="modal-head" id="confirmTitle">确认操作</div>
@@ -1611,6 +1813,8 @@ function showTab(name) {
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === 'tab-' + name));
   if (name === 'online') loadOnline();
+  if (name === 'analytics') loadOrderAnalytics();
+  if (name === 'devices') loadDevicesAdmin();
   if (name === 'customers') loadCustomers();
   if (name === 'cards') loadCards();
   if (name === 'equipment') loadEquipmentConfig();
@@ -1626,6 +1830,55 @@ async function loadOverview() {
     ['运行中', d.running_count], ['已完成', d.finished_count], ['总剩余分钟', d.total_balance_minutes],
   ];
   $('overviewCards').innerHTML = cards.map(([k,v]) => `<div class="stat-card"><div class="stat-label">${k}</div><div class="stat-value">${esc(v)}</div></div>`).join('');
+  await loadActivityStats();
+}
+async function loadActivityStats() {
+  const d = await api('/api/admin/activity-stats');
+  const s = d.stats || {};
+  const statusText = (s.login_status_breakdown || []).map(x => `${esc(x.status)}：${esc(x.count)}`).join(' / ') || '-';
+  const qualityText = (s.order_quality_breakdown || []).map(x => `${esc(x.quality)} ${esc(x.count)}单 ${esc(x.hours)}小时`).join(' / ') || '-';
+  const noRows = (s.login_without_order_customers || []).slice(0, 20).map(x => `<tr><td>${esc(x.username)}</td><td>${esc(x.login_count)}</td><td>${fmtDate(x.last_login_at)}</td><td>${esc(x.order_status_at_login || 'none')}</td></tr>`).join('');
+  $('activityStatsPanel').innerHTML = `
+    <div class="grid stats-grid">
+      <div class="stat-card"><div class="stat-label">今日登录客户</div><div class="stat-value">${esc(s.login_customer_count || 0)}</div></div>
+      <div class="stat-card"><div class="stat-label">登录未下单</div><div class="stat-value">${esc(s.login_without_order_count || 0)}</div></div>
+      <div class="stat-card"><div class="stat-label">今日下单客户</div><div class="stat-value">${esc(s.order_customer_count || 0)}</div></div>
+      <div class="stat-card"><div class="stat-label">今日订单数</div><div class="stat-value">${esc(s.order_count || 0)}</div></div>
+      <div class="stat-card"><div class="stat-label">今日下单小时</div><div class="stat-value">${esc(s.order_hours || 0)}</div></div>
+    </div>
+    <div class="hint" style="margin-top:8px">登录时订单状态：${statusText}<br>下单类型：${qualityText}</div>
+    ${noRows ? `<table class="data-table" style="margin-top:10px"><thead><tr><th>登录未下单客户</th><th>登录次数</th><th>最后登录</th><th>登录当时订单状态</th></tr></thead><tbody>${noRows}</tbody></table>` : '<div class="empty-state" style="margin-top:10px">暂无登录未下单客户</div>'}
+  `;
+}
+async function loadOrderAnalytics() {
+  if (!$('analyticsDate').value) $('analyticsDate').value = new Date().toISOString().slice(0,10);
+  const period = $('analyticsPeriod').value || 'day';
+  const date = $('analyticsDate').value || '';
+  const d = await api('/api/admin/order-analytics?period=' + encodeURIComponent(period) + '&date=' + encodeURIComponent(date));
+  renderOrderAnalytics(d.analytics || {});
+}
+function renderOrderAnalytics(a) {
+  const maxOrders = Math.max(1, ...(a.daily_series || []).map(x => Number(x.order_count || 0)));
+  const bars = (a.daily_series || []).map(x => `<div class="bar-row"><div>${esc(x.date)}</div><div class="bar-track"><div class="bar-fill" style="width:${Math.max(2, Number(x.order_count || 0) / maxOrders * 100)}%"></div></div><div>${esc(x.order_count)}单 / ${esc(x.hours)}h</div></div>`).join('');
+  const ranks = (a.customer_rank || []).slice(0, 20).map((x, i) => `<tr><td>${i+1}</td><td>${esc(x.username)}</td><td>${esc(x.order_count)}</td><td>${esc(x.hours)}</td></tr>`).join('');
+  const statusRows = (a.status_breakdown || []).map(x => `<span class="badge badge-offline" style="margin-right:6px">${esc(x.status)} ${esc(x.count)}</span>`).join('') || '-';
+  const qualityRows = (a.quality_breakdown || []).map(x => `<span class="badge badge-machine" style="margin-right:6px">${esc(x.quality)} ${esc(x.order_count)}单 ${esc(x.hours)}h</span>`).join('') || '-';
+  $('analyticsPanel').innerHTML = `
+    <div class="grid stats-grid">
+      <div class="stat-card"><div class="stat-label">订单数</div><div class="stat-value">${esc(a.order_count || 0)}</div></div>
+      <div class="stat-card"><div class="stat-label">下单老板数</div><div class="stat-value">${esc(a.customer_count || 0)}</div></div>
+      <div class="stat-card"><div class="stat-label">下单小时</div><div class="stat-value">${esc(a.requested_hours || 0)}</div></div>
+      <div class="stat-card"><div class="stat-label">完成小时</div><div class="stat-value">${esc(a.completed_hours || 0)}</div></div>
+      <div class="stat-card"><div class="stat-label">异常/失败单</div><div class="stat-value">${esc(a.failed_order_count || 0)}</div></div>
+    </div>
+    <div class="panel" style="margin-top:14px"><div class="section-title">每日订单柱状图（${esc(a.start_date)} 至 ${esc(a.end_date)}）</div><div class="bar-list">${bars || '<div class="empty-state">暂无数据</div>'}</div></div>
+    <div class="grid" style="grid-template-columns:1fr 1fr;margin-top:14px">
+      <div class="panel"><div class="section-title">状态分布</div><div style="margin-top:10px">${statusRows}</div></div>
+      <div class="panel"><div class="section-title">模式分布</div><div style="margin-top:10px">${qualityRows}</div></div>
+    </div>
+    <div class="panel" style="margin-top:14px"><div class="section-title">下单排行 TOP20</div>
+      ${ranks ? `<table class="data-table" style="margin-top:10px"><thead><tr><th>#</th><th>老板/客户</th><th>订单数</th><th>小时</th></tr></thead><tbody>${ranks}</tbody></table>` : '<div class="empty-state">暂无排行</div>'}
+    </div>`;
 }
 async function loadOnline(target='onlineTable') {
   const d = await api('/api/admin/customers?online_only=true');
@@ -1726,6 +1979,78 @@ async function deleteCustomer(id, name='') {
   try {
     await api(`/api/admin/customers/${id}`, {method:'DELETE'});
     toast('客户已删除'); await loadCustomers(); await loadOnline(); await loadOverview();
+  } catch(e) { toast(e.message); }
+}
+
+async function loadDevicesAdmin() {
+  const d = await api('/api/admin/devices');
+  renderDevicesAdmin(d.devices || []);
+}
+function renderDevicesAdmin(rows) {
+  if (!rows.length) { $('devicesTable').innerHTML = '<div class="empty-state">暂无设备；请先在 /setup 配置 Bridge API Key，并确认中央 Bridge 已有在线 Agent。</div>'; return; }
+  $('devicesTable').innerHTML = `<table class="data-table"><thead><tr>
+    <th>设备</th><th>在线</th><th>控制状态</th><th>Agent/UI</th><th>当前订单</th><th>操作</th>
+  </tr></thead><tbody>` + rows.map(d => {
+    const o = d.active_order;
+    return `<tr>
+      <td><b>${esc(d.device_name || (d.id + '号机'))}</b><br><span class="hint">#${esc(d.id)}</span></td>
+      <td>${onlineBadge(d.online)}</td>
+      <td>${statusBadge(d.control_state || '-')}</td>
+      <td>${esc(d.agent_state || '-')}<br><span class="hint">${esc(d.ui_state || '')}</span></td>
+      <td>${o ? `${statusBadge(o.status)}<br>${esc(o.customer_username || d.active_customer || '-') } / 剩 ${fmtMin(o.remaining_minutes)}` : '-'}</td>
+      <td>
+        ${!o ? `<button class="btn-sm btn-green" onclick="openManualOrder(${d.id}, decodeURIComponent('${encodeURIComponent(d.device_name || (d.id + '号机'))}'))">手动下单</button>` : ''}
+        ${o ? `<button class="btn-sm btn-primary" onclick="openAdminRejoin(${o.id}, decodeURIComponent('${encodeURIComponent(o.team_code || '')}'))">换队</button>
+               <button class="btn-sm btn-danger" onclick="sendDeviceCommand(${d.id}, 'stop_current')">停止</button>
+               <button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'ready')">准备</button>
+               <button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'watch')">观战</button>` : ''}
+      </td>
+    </tr>`;
+  }).join('') + '</tbody></table>';
+}
+function openManualOrder(deviceId, name) {
+  $('manualDeviceId').value = deviceId;
+  $('manualDeviceInfo').textContent = `设备：${name || deviceId}`;
+  $('manualTeamCode').value = '';
+  $('manualHours').value = '1';
+  $('manualMinutes').value = '0';
+  $('manualMode').value = 'machine';
+  $('manualRounds').value = '0';
+  openModal('manualOrderModal');
+}
+async function submitManualOrder() {
+  const minutes = Number($('manualHours').value || 0) * 60 + Number($('manualMinutes').value || 0);
+  const mode = $('manualMode').value;
+  try {
+    await api('/api/admin/manual-order', {method:'POST', body:JSON.stringify({
+      device_id: Number($('manualDeviceId').value || 0),
+      boss_name: $('manualTeamCode').value.trim(),
+      run_minutes: minutes,
+      run_rounds: Number($('manualRounds').value || 0),
+      selected_mode: mode,
+    })});
+    closeModal('manualOrderModal'); toast('手动下单已创建'); await loadDevicesAdmin(); await loadOrders(); await loadOverview();
+  } catch(e) { toast(e.message); }
+}
+function openAdminRejoin(orderId, oldTeam='') {
+  $('rejoinOrderId').value = orderId;
+  $('rejoinInfo').textContent = `订单 #${orderId}`;
+  $('rejoinTeamCode').value = oldTeam || '';
+  openModal('adminRejoinModal');
+}
+async function submitAdminRejoin() {
+  const id = $('rejoinOrderId').value;
+  try {
+    await api('/api/admin/manual-rejoin/' + id, {method:'POST', body:JSON.stringify({boss_name:$('rejoinTeamCode').value.trim()})});
+    closeModal('adminRejoinModal'); toast('换队指令已下发'); await loadDevicesAdmin(); await loadOrders();
+  } catch(e) { toast(e.message); }
+}
+async function sendDeviceCommand(deviceId, action) {
+  const ok = await appConfirm('设备直控确认', `确认向 ${deviceId} 号机下发 ${action} 指令？`, action === 'stop_current' ? 'btn-danger' : 'btn-primary');
+  if (!ok) return;
+  try {
+    await api(`/api/admin/devices/${deviceId}/command`, {method:'POST', body:JSON.stringify({action, params:{operator:'merchant_admin'}})});
+    toast('指令已下发'); await loadDevicesAdmin(); await loadOrders(); await loadOverview();
   } catch(e) { toast(e.message); }
 }
 
