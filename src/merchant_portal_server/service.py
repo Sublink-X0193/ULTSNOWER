@@ -135,8 +135,14 @@ class MerchantService:
             try:
                 con.execute("BEGIN IMMEDIATE")
                 cur = con.execute(
-                    "INSERT INTO customers(username,password_hash,balance_minutes,balance_rounds,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
-                    (username, hash_password(password), 0, 0, "active", now_s, now_s),
+                    """INSERT INTO customers(
+                         username,password_hash,
+                         balance_minutes,balance_rounds,
+                         balance_machine_minutes,balance_machine_rounds,
+                         balance_absolute_minutes,balance_absolute_rounds,
+                         status,created_at,updated_at
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                    (username, hash_password(password), 0, 0, 0, 0, 0, 0, "active", now_s, now_s),
                 )
                 con.commit()
                 return {"id": int(cur.lastrowid), "username": username, "balance_minutes": 0, "balance_rounds": 0}
@@ -182,12 +188,43 @@ class MerchantService:
             ).fetchone()
             return self.public_customer(dict(row)) if row else None
 
+    @staticmethod
+    def _mode_balance_columns(mode_or_quality: Any) -> tuple[str, str]:
+        raw = str(mode_or_quality or "").strip().lower()
+        if raw in {"absolute", "secret", "绝密"}:
+            return "balance_absolute_minutes", "balance_absolute_rounds"
+        return "balance_machine_minutes", "balance_machine_rounds"
+
+    @staticmethod
+    def _mode_from_quality(quality: Any) -> str:
+        return "absolute" if str(quality or "").strip().lower() in {"absolute", "secret", "绝密"} else "machine"
+
+    def _sync_customer_balance_locked(self, con: sqlite3.Connection, customer_id: int) -> None:
+        con.execute(
+            """UPDATE customers
+               SET balance_minutes=balance_machine_minutes+balance_absolute_minutes,
+                   balance_rounds=balance_machine_rounds+balance_absolute_rounds,
+                   updated_at=?
+               WHERE id=?""",
+            (iso(), customer_id),
+        )
+
     def public_customer(self, row: dict[str, Any]) -> dict[str, Any]:
+        # New merchant split keeps machine/absolute balances independent.
+        # Fallback handles rows from pre-migration tests or stale DB snapshots.
+        machine_minutes = int(row.get("balance_machine_minutes") if row.get("balance_machine_minutes") is not None else row.get("balance_minutes") or 0)
+        machine_rounds = int(row.get("balance_machine_rounds") if row.get("balance_machine_rounds") is not None else row.get("balance_rounds") or 0)
+        absolute_minutes = int(row.get("balance_absolute_minutes") or 0)
+        absolute_rounds = int(row.get("balance_absolute_rounds") or 0)
         return {
             "id": int(row["id"]),
             "username": row["username"],
-            "balance_minutes": int(row.get("balance_minutes") or 0),
-            "balance_rounds": int(row.get("balance_rounds") or 0),
+            "balance_minutes": machine_minutes + absolute_minutes,
+            "balance_rounds": machine_rounds + absolute_rounds,
+            "balance_machine_minutes": machine_minutes,
+            "balance_machine_rounds": machine_rounds,
+            "balance_absolute_minutes": absolute_minutes,
+            "balance_absolute_rounds": absolute_rounds,
             "status": row.get("status") or "active",
         }
 
@@ -210,7 +247,7 @@ class MerchantService:
                 ).fetchone()["n"]
             )
             running_count = int(con.execute("SELECT COUNT(*) AS n FROM local_orders WHERE status='running'").fetchone()["n"])
-            total_balance_minutes = int(con.execute("SELECT COALESCE(SUM(balance_minutes),0) AS n FROM customers").fetchone()["n"] or 0)
+            total_balance_minutes = int(con.execute("SELECT COALESCE(SUM(balance_machine_minutes+balance_absolute_minutes),0) AS n FROM customers").fetchone()["n"] or 0)
             finished_count = int(con.execute("SELECT COUNT(*) AS n FROM local_orders WHERE status='finished'").fetchone()["n"])
             interrupted_count = int(con.execute("SELECT COUNT(*) AS n FROM local_orders WHERE status LIKE 'interrupted_%' OR status='failed'").fetchone()["n"])
         return {
@@ -255,8 +292,21 @@ class MerchantService:
         status = status if status in {"active", "frozen"} else "active"
         with self.db.connect() as con:
             con.execute(
-                "UPDATE customers SET balance_minutes=?,balance_rounds=?,status=?,updated_at=? WHERE id=?",
-                (max(0, int(balance_minutes or 0)), max(0, int(balance_rounds or 0)), status, iso(), customer["id"]),
+                """UPDATE customers
+                   SET balance_minutes=?,balance_rounds=?,
+                       balance_machine_minutes=?,balance_machine_rounds=?,
+                       balance_absolute_minutes=0,balance_absolute_rounds=0,
+                       status=?,updated_at=?
+                   WHERE id=?""",
+                (
+                    max(0, int(balance_minutes or 0)),
+                    max(0, int(balance_rounds or 0)),
+                    max(0, int(balance_minutes or 0)),
+                    max(0, int(balance_rounds or 0)),
+                    status,
+                    iso(),
+                    customer["id"],
+                ),
             )
         return self.get_customer(customer["id"])
 
@@ -267,8 +317,8 @@ class MerchantService:
                 row = con.execute("SELECT * FROM customers WHERE id=?", (customer_id,)).fetchone()
                 if not row:
                     raise MerchantError("not_found", "客户不存在", 404)
-                minutes = int(row["balance_minutes"] or 0)
-                rounds = int(row["balance_rounds"] or 0)
+                minutes = int(row["balance_machine_minutes"] or 0)
+                rounds = int(row["balance_machine_rounds"] or 0)
                 if balance_minutes is not None:
                     minutes = int(balance_minutes)
                 if balance_rounds is not None:
@@ -279,7 +329,14 @@ class MerchantService:
                     rounds += int(delta_rounds)
                 minutes = max(0, minutes)
                 rounds = max(0, rounds)
-                con.execute("UPDATE customers SET balance_minutes=?,balance_rounds=?,updated_at=? WHERE id=?", (minutes, rounds, iso(), customer_id))
+                con.execute(
+                    """UPDATE customers
+                       SET balance_machine_minutes=?,balance_machine_rounds=?,
+                           balance_absolute_minutes=0,balance_absolute_rounds=0
+                       WHERE id=?""",
+                    (minutes, rounds, customer_id),
+                )
+                self._sync_customer_balance_locked(con, customer_id)
                 con.commit()
             except Exception:
                 con.rollback()
@@ -435,6 +492,7 @@ class MerchantService:
         order_dict = dict(row)
         refund_minutes = self._remaining_minutes(order_dict)
         refund_rounds = int(order_dict.get("requested_rounds") or 0)
+        refund_minutes_col, refund_rounds_col = self._mode_balance_columns(self._mode_from_quality(order_dict.get("quality")))
         now_s = iso()
         with self.db.connect() as con:
             con.execute("BEGIN IMMEDIATE")
@@ -450,9 +508,10 @@ class MerchantService:
                 ).fetchone()
                 if not already_refunded and (refund_minutes > 0 or refund_rounds > 0):
                     con.execute(
-                        "UPDATE customers SET balance_minutes=balance_minutes+?,balance_rounds=balance_rounds+?,updated_at=? WHERE id=?",
+                        f"UPDATE customers SET {refund_minutes_col}={refund_minutes_col}+?,{refund_rounds_col}={refund_rounds_col}+?,updated_at=? WHERE id=?",
                         (refund_minutes, refund_rounds, now_s, customer_id),
                     )
+                    self._sync_customer_balance_locked(con, customer_id)
                     con.execute(
                         "INSERT OR IGNORE INTO refund_records(local_order_id,customer_id,minutes,rounds,reason,created_at) VALUES(?,?,?,?,?,?)",
                         (order_id, customer_id, refund_minutes, refund_rounds, "customer_stop", now_s),
@@ -897,17 +956,20 @@ class MerchantService:
                     )
                 minutes = int(card["minutes"] or 0)
                 rounds = int(card["rounds"] or 0)
+                mode = card["mode"] or "machine"
+                minutes_col, rounds_col = self._mode_balance_columns(mode)
                 con.execute("UPDATE recharge_cards SET status='used',used_by_customer_id=?,used_at=? WHERE code_hash=?", (customer_id, now_s, code_hash))
                 con.execute(
-                    "UPDATE customers SET balance_minutes=balance_minutes+?,balance_rounds=balance_rounds+?,updated_at=? WHERE id=?",
+                    f"UPDATE customers SET {minutes_col}={minutes_col}+?,{rounds_col}={rounds_col}+?,updated_at=? WHERE id=?",
                     (minutes, rounds, now_s, customer_id),
                 )
+                self._sync_customer_balance_locked(con, customer_id)
                 con.execute(
                     "INSERT INTO recharge_records(customer_id,code_hash,minutes,rounds,created_at) VALUES(?,?,?,?,?)",
                     (customer_id, code_hash, minutes, rounds, now_s),
                 )
                 con.commit()
-                return {"minutes": minutes, "rounds": rounds, "mode": card["mode"] or "machine", "card_type": card["card_type"] or "normal", "customer": self.get_customer(customer_id)}
+                return {"minutes": minutes, "rounds": rounds, "mode": mode, "card_type": card["card_type"] or "normal", "customer": self.get_customer(customer_id)}
             except Exception:
                 con.rollback()
                 raise
@@ -944,9 +1006,32 @@ class MerchantService:
                     username = f"{username_base}_{secrets.token_hex(2)}"
                 minutes = int(card["minutes"] or 0)
                 rounds = int(card["rounds"] or 0)
+                mode = card["mode"] or "machine"
+                machine_minutes = minutes if mode != "absolute" else 0
+                machine_rounds = rounds if mode != "absolute" else 0
+                absolute_minutes = minutes if mode == "absolute" else 0
+                absolute_rounds = rounds if mode == "absolute" else 0
                 cur = con.execute(
-                    "INSERT INTO customers(username,password_hash,balance_minutes,balance_rounds,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
-                    (username, hash_password(secrets.token_urlsafe(18)), minutes, rounds, "active", now_s, now_s),
+                    """INSERT INTO customers(
+                         username,password_hash,
+                         balance_minutes,balance_rounds,
+                         balance_machine_minutes,balance_machine_rounds,
+                         balance_absolute_minutes,balance_absolute_rounds,
+                         status,created_at,updated_at
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        username,
+                        hash_password(secrets.token_urlsafe(18)),
+                        minutes,
+                        rounds,
+                        machine_minutes,
+                        machine_rounds,
+                        absolute_minutes,
+                        absolute_rounds,
+                        "active",
+                        now_s,
+                        now_s,
+                    ),
                 )
                 customer_id = int(cur.lastrowid)
                 con.execute("UPDATE recharge_cards SET status='used',used_by_customer_id=?,used_at=? WHERE code_hash=?", (customer_id, now_s, code_hash))
@@ -995,6 +1080,8 @@ class MerchantService:
         requested_rounds = max(0, int(requested_rounds or 0))
         team_code = str(team_code or "").strip().upper()
         quality = str(quality or "standard").strip() or "standard"
+        balance_mode = self._mode_from_quality(quality)
+        minutes_col, rounds_col = self._mode_balance_columns(balance_mode)
         if requested_minutes <= 0 or requested_minutes > 24 * 60:
             raise MerchantError("bad_minutes", "购买分钟数不合法")
         if requested_rounds > 10000:
@@ -1032,15 +1119,16 @@ class MerchantService:
                 if settings.get("maintenance_mode_enabled"):
                     msg = settings.get("maintenance_message") or "商户维护模式已开启，暂时不能下单"
                     raise MerchantError("maintenance_mode", str(msg), 503)
-                if int(customer["balance_minutes"] or 0) < requested_minutes:
+                if int(customer[minutes_col] or 0) < requested_minutes:
                     raise MerchantError("insufficient_balance", "分钟余额不足", 402)
-                if requested_rounds and int(customer["balance_rounds"] or 0) < requested_rounds:
+                if requested_rounds and int(customer[rounds_col] or 0) < requested_rounds:
                     raise MerchantError("insufficient_rounds", "战损余额不足", 402)
                 order_no = self._new_order_no()
                 con.execute(
-                    "UPDATE customers SET balance_minutes=balance_minutes-?,balance_rounds=balance_rounds-?,updated_at=? WHERE id=?",
+                    f"UPDATE customers SET {minutes_col}={minutes_col}-?,{rounds_col}={rounds_col}-?,updated_at=? WHERE id=?",
                     (requested_minutes, requested_rounds, now_s, customer_id),
                 )
+                self._sync_customer_balance_locked(con, customer_id)
                 cur = con.execute(
                     """INSERT INTO local_orders(customer_id,status,local_order_no,requested_minutes,requested_rounds,team_code,quality,amount_cents,created_at,updated_at)
                        VALUES(?,?,?,?,?,?,?,?,?,?)""",
@@ -1110,7 +1198,12 @@ class MerchantService:
                 if order["status"] not in {"failed", "refunded", "finished"}:
                     minutes = int(order["requested_minutes"] or 0)
                     rounds = int(order["requested_rounds"] or 0)
-                    con.execute("UPDATE customers SET balance_minutes=balance_minutes+?,balance_rounds=balance_rounds+?,updated_at=? WHERE id=?", (minutes, rounds, iso(), int(order["customer_id"])))
+                    minutes_col, rounds_col = self._mode_balance_columns(self._mode_from_quality(order["quality"]))
+                    con.execute(
+                        f"UPDATE customers SET {minutes_col}={minutes_col}+?,{rounds_col}={rounds_col}+?,updated_at=? WHERE id=?",
+                        (minutes, rounds, iso(), int(order["customer_id"])),
+                    )
+                    self._sync_customer_balance_locked(con, int(order["customer_id"]))
                     con.execute(
                         "INSERT OR IGNORE INTO refund_records(local_order_id,customer_id,minutes,rounds,reason,created_at) VALUES(?,?,?,?,?,?)",
                         (order_id, int(order["customer_id"]), minutes, rounds, "bridge_claim_or_bundle_failed", iso()),
@@ -1258,7 +1351,12 @@ class MerchantService:
         rounds = int(order.get("requested_rounds") or 0)
         now_s = iso()
         if minutes > 0 or rounds > 0:
-            con.execute("UPDATE customers SET balance_minutes=balance_minutes+?,balance_rounds=balance_rounds+?,updated_at=? WHERE id=?", (minutes, rounds, now_s, customer_id))
+            minutes_col, rounds_col = self._mode_balance_columns(self._mode_from_quality(order.get("quality")))
+            con.execute(
+                f"UPDATE customers SET {minutes_col}={minutes_col}+?,{rounds_col}={rounds_col}+?,updated_at=? WHERE id=?",
+                (minutes, rounds, now_s, customer_id),
+            )
+            self._sync_customer_balance_locked(con, customer_id)
             con.execute(
                 "INSERT OR IGNORE INTO refund_records(local_order_id,customer_id,minutes,rounds,reason,created_at) VALUES(?,?,?,?,?,?)",
                 (order_id, customer_id, minutes, rounds, reason, now_s),

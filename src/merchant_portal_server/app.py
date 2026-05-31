@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import secrets
+import string
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -127,6 +131,21 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
                 payload[key] = truthy(payload.get(key))
         return payload
 
+    def captcha_signature(code: str) -> str:
+        return hmac.new(settings.merchant_ref_secret.encode("utf-8"), code.upper().encode("utf-8"), hashlib.sha256).hexdigest()
+
+    def make_captcha_cookie(code: str) -> str:
+        return f"{code.upper()}:{captcha_signature(code)}"
+
+    def verify_captcha(request: Request, submitted: Any) -> bool:
+        code = str(submitted or "").strip().upper()
+        raw = request.cookies.get("merchant_register_captcha") or ""
+        if not code or ":" not in raw:
+            return False
+        expected, sig = raw.split(":", 1)
+        expected = expected.strip().upper()
+        return bool(expected and hmac.compare_digest(code, expected) and hmac.compare_digest(sig, captcha_signature(expected)))
+
     def admin_settings_view(st: dict[str, Any]) -> dict[str, Any]:
         out = dict(st)
         out["privacy_mode"] = "1" if truthy(st.get("privacy_mode_enabled")) else "0"
@@ -238,7 +257,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
 
     @app.get("/merchant-admin", response_class=HTMLResponse)
     def admin_home(admin: dict[str, Any] = Depends(current_admin)) -> HTMLResponse:
-        return HTMLResponse(_admin_dashboard_html(admin))
+        return HTMLResponse(_admin_dashboard_html(admin, service.get_settings()))
 
     @app.post("/merchant-admin/settings")
     def admin_settings_form(
@@ -265,10 +284,13 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
 
     # JSON API
     @app.post("/api/register")
-    def api_register(response: Response, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    def api_register(request: Request, response: Response, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        if not verify_captcha(request, body.get("captcha")):
+            raise MerchantError("bad_captcha", "验证码错误或已过期", 400)
         customer = service.register_customer(body.get("username") or "", body.get("password") or "")
         sid = service.create_session(customer["id"])
         set_session_cookie(response, sid)
+        response.delete_cookie("merchant_register_captcha")
         return json_ok(msg="注册成功", user_id=customer["id"], redirect="/customer", customer=service.get_customer(customer["id"]))
 
     @app.post("/api/login")
@@ -302,9 +324,17 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
 
     @app.get("/api/captcha")
     def api_captcha() -> Response:
-        svg = "<svg xmlns='http://www.w3.org/2000/svg' width='120' height='40'><rect width='120' height='40' fill='#f8fafc'/><text x='12' y='26' font-size='18' fill='#2563eb'>LOCAL</text></svg>"
+        alphabet = string.ascii_uppercase + string.digits
+        code = "".join(secrets.choice(alphabet) for _ in range(4))
+        noise = "".join(f"<circle cx='{secrets.randbelow(120)}' cy='{secrets.randbelow(40)}' r='{1 + secrets.randbelow(3)}' fill='#bfdbfe' opacity='.65'/>" for _ in range(10))
+        lines = "".join(f"<line x1='{secrets.randbelow(120)}' y1='{secrets.randbelow(40)}' x2='{secrets.randbelow(120)}' y2='{secrets.randbelow(40)}' stroke='#93c5fd' stroke-width='1' opacity='.55'/>" for _ in range(4))
+        chars = "".join(
+            f"<text x='{18 + i * 22}' y='{25 + secrets.randbelow(7)}' font-size='{20 + secrets.randbelow(4)}' font-family='Consolas,monospace' font-weight='700' fill='#1d4ed8' transform='rotate({secrets.randbelow(17)-8} {18 + i * 22} 22)'>{ch}</text>"
+            for i, ch in enumerate(code)
+        )
+        svg = f"<svg xmlns='http://www.w3.org/2000/svg' width='120' height='40'><rect width='120' height='40' rx='8' fill='#f8fafc'/>{noise}{lines}{chars}</svg>"
         resp = Response(svg, media_type="image/svg+xml")
-        resp.set_cookie("captcha", "LOCAL", samesite="lax")
+        resp.set_cookie("merchant_register_captcha", make_captcha_cookie(code), httponly=True, samesite="lax", max_age=300)
         return resp
 
     @app.get("/api/me")
@@ -320,10 +350,10 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
             username=fresh["username"],
             role=role,
             tenant_id=0,
-            balance_machine=int(fresh.get("balance_minutes") or 0),
-            balance_absolute=int(fresh.get("balance_minutes") or 0),
-            balance_machine_rounds=int(fresh.get("balance_rounds") or 0),
-            balance_absolute_rounds=int(fresh.get("balance_rounds") or 0),
+            balance_machine=int(fresh.get("balance_machine_minutes") or 0),
+            balance_absolute=int(fresh.get("balance_absolute_minutes") or 0),
+            balance_machine_rounds=int(fresh.get("balance_machine_rounds") or 0),
+            balance_absolute_rounds=int(fresh.get("balance_absolute_rounds") or 0),
             balance_minutes=int(fresh.get("balance_minutes") or 0),
             balance_rounds=int(fresh.get("balance_rounds") or 0),
         )
@@ -375,8 +405,10 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         mode = str(body.get("selected_mode") or body.get("mode") or "machine").strip().lower()
         if mode not in {"machine", "absolute"}:
             mode = "machine"
-        minutes = int(body.get("run_minutes") or body.get("minutes") or body.get("requested_minutes") or fresh.get("balance_minutes") or 0)
-        rounds = int(body.get("run_rounds") or body.get("rounds") or body.get("max_rounds") or fresh.get("balance_rounds") or 0)
+        available_minutes = int((fresh.get("balance_absolute_minutes") if mode == "absolute" else fresh.get("balance_machine_minutes")) or 0)
+        available_rounds = int((fresh.get("balance_absolute_rounds") if mode == "absolute" else fresh.get("balance_machine_rounds")) or 0)
+        minutes = int(body.get("run_minutes") or body.get("minutes") or body.get("requested_minutes") or available_minutes)
+        rounds = int(body.get("run_rounds") or body.get("rounds") or body.get("max_rounds") or available_rounds)
         quality = "secret" if mode == "absolute" else "standard"
         team_code = body.get("boss_name") or body.get("team_code") or ""
         result = service.place_order(
@@ -1058,13 +1090,14 @@ setInterval(loadCurrent, 15000);
     )
 
 
-def _admin_dashboard_html(admin: dict[str, Any]) -> str:
+def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None = None) -> str:
+    system_name = _escape((settings or {}).get("system_name") or "SNOW 自助下单")
     template = r"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SNOW 商户后台</title>
+  <title>__SYSTEM_NAME__ 商户后台</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; background: #f0f2f5; color: #1f2937; min-height: 100vh; }
@@ -1158,7 +1191,7 @@ def _admin_dashboard_html(admin: dict[str, Any]) -> str:
 </head>
 <body>
   <div class="topbar">
-    <div class="topbar-logo">SNOW 商户服务器 · 管理后台</div>
+    <div class="topbar-logo">__SYSTEM_NAME__ · 商户管理后台</div>
     <div class="topbar-right">
       <span>__ADMIN__ / __ROLE__</span>
       <button class="btn-sm btn-gray" onclick="location.href='/'">客户首页</button>
@@ -2031,4 +2064,4 @@ loadAll().then(loadSettings).catch(e => toast(e.message));
 </script>
 </body>
 </html>"""
-    return template.replace("__ADMIN__", _escape(admin.get("username"))).replace("__ROLE__", _escape(admin.get("role")))
+    return template.replace("__SYSTEM_NAME__", system_name).replace("__ADMIN__", _escape(admin.get("username"))).replace("__ROLE__", _escape(admin.get("role")))

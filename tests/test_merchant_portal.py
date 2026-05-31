@@ -143,7 +143,9 @@ def app_and_bridge(tmp_path):
 
 
 def register_and_login(client: TestClient, username: str = "alice") -> dict[str, Any]:
-    r = client.post("/api/register", json={"username": username, "password": "123456"})
+    client.get("/api/captcha")
+    captcha = (client.cookies.get("merchant_register_captcha") or "").split(":", 1)[0]
+    r = client.post("/api/register", json={"username": username, "password": "123456", "captcha": captcha})
     assert r.status_code == 200, r.text
     return r.json()["customer"]
 
@@ -151,11 +153,19 @@ def register_and_login(client: TestClient, username: str = "alice") -> dict[str,
 def test_register_login_recharge(app_and_bridge):
     app, _bridge = app_and_bridge
     client = TestClient(app)
+    captcha_svg = client.get("/api/captcha")
+    assert captcha_svg.status_code == 200
+    assert "LOCAL" not in captcha_svg.text
+    bad = client.post("/api/register", json={"username": "captcha_bad", "password": "123456", "captcha": "BAD1"})
+    assert bad.status_code == 400
+    assert bad.json()["error"] == "bad_captcha"
     customer = register_and_login(client)
     app.state.service.add_recharge_card("CARD-100", minutes=100)
     r = client.post("/api/recharge/redeem", json={"code": "CARD-100"})
     assert r.status_code == 200, r.text
     assert r.json()["customer"]["balance_minutes"] == 100
+    assert r.json()["customer"]["balance_machine_minutes"] == 100
+    assert r.json()["customer"]["balance_absolute_minutes"] == 0
     assert client.get("/api/me").json()["customer"]["username"] == customer["username"]
 
 
@@ -163,7 +173,7 @@ def test_order_waits_for_ready_timer_before_running(app_and_bridge):
     app, bridge = app_and_bridge
     client = TestClient(app)
     register_and_login(client)
-    app.state.service.add_recharge_card("CARD-30", minutes=30)
+    app.state.service.add_recharge_card("CARD-30", minutes=30, mode="absolute")
     client.post("/api/recharge/redeem", json={"code": "CARD-30"})
 
     r = client.post("/api/orders", json={"requested_minutes": 10, "team_code": "JYG4545", "quality": "secret"}, headers={"X-Idempotency-Key": "order-1"})
@@ -429,6 +439,12 @@ def test_admin_settings_legacy_ui_and_post_compatibility(app_and_bridge):
     assert notice.status_code == 200
     assert client.get("/api/notice").json()["content"] == "<b>公告</b>"
 
+    renamed = client.post("/api/admin/settings", json={"system_name": "七元电竞"})
+    assert renamed.status_code == 200
+    admin_html = client.get("/merchant-admin").text
+    assert "七元电竞 · 商户管理后台" in admin_html
+    assert "SNOW 商户服务器 · 管理后台" not in admin_html
+
 
 def test_customer_usage_settings_are_merchant_owned_and_applied(app_and_bridge):
     app, bridge = app_and_bridge
@@ -446,7 +462,7 @@ def test_customer_usage_settings_are_merchant_owned_and_applied(app_and_bridge):
 
     user_client = TestClient(app)
     register_and_login(user_client, "policy_user")
-    app.state.service.add_recharge_card("POLICY-60", minutes=60)
+    app.state.service.add_recharge_card("POLICY-60", minutes=60, mode="absolute")
     assert user_client.post("/api/recharge/redeem", json={"code": "POLICY-60"}).status_code == 200
     order = user_client.post("/api/orders", json={"requested_minutes": 10, "team_code": "POLICY", "quality": "secret"}).json()["order"]
     assert order["status"] == "waiting_ready_timer"
@@ -582,7 +598,9 @@ def test_legacy_customer_login_portal_and_api_compatibility(app_and_bridge):
     assert "验证码" in register_html
     assert "/api/register" in register_html
 
-    registered = client.post("/api/register", json={"username": "legacy_user", "password": "123456"})
+    client.get("/api/captcha")
+    captcha = (client.cookies.get("merchant_register_captcha") or "").split(":", 1)[0]
+    registered = client.post("/api/register", json={"username": "legacy_user", "password": "123456", "captcha": captcha})
     assert registered.status_code == 200, registered.text
     customer_html = client.get("/customer").text
     assert "设备列表" in customer_html
@@ -597,7 +615,18 @@ def test_legacy_customer_login_portal_and_api_compatibility(app_and_bridge):
     assert recharge.json()["minutes"] == 30
     balance = client.get("/api/balance").json()
     assert balance["balance_machine"] == 30
+    assert balance["balance_absolute"] == 0
     assert balance["balance_machine_rounds"] == 2
+    assert balance["balance_absolute_rounds"] == 0
+
+    app.state.service.add_recharge_card("LEGACY-ABS", minutes=45, rounds=3, mode="absolute")
+    recharge_abs = client.post("/api/recharge", json={"card_code": "LEGACY-ABS"})
+    assert recharge_abs.status_code == 200, recharge_abs.text
+    balance2 = client.get("/api/balance").json()
+    assert balance2["balance_machine"] == 30
+    assert balance2["balance_absolute"] == 45
+    assert balance2["balance_machine_rounds"] == 2
+    assert balance2["balance_absolute_rounds"] == 3
 
     devices = client.get("/api/devices/status").json()
     assert devices["ok"] is True

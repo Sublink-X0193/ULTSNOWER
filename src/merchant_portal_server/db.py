@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def utcnow() -> datetime:
@@ -64,17 +64,43 @@ class Database:
             con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def _migrate(self, con: sqlite3.Connection) -> None:
-        cols = {r["name"] for r in con.execute("PRAGMA table_info(recharge_cards)").fetchall()}
-        migrations = {
+        card_cols = {r["name"] for r in con.execute("PRAGMA table_info(recharge_cards)").fetchall()}
+        card_migrations = {
             "code_plain": "ALTER TABLE recharge_cards ADD COLUMN code_plain TEXT",
             "card_type": "ALTER TABLE recharge_cards ADD COLUMN card_type TEXT NOT NULL DEFAULT 'normal'",
             "mode": "ALTER TABLE recharge_cards ADD COLUMN mode TEXT NOT NULL DEFAULT 'machine'",
             "night_coin_loss": "ALTER TABLE recharge_cards ADD COLUMN night_coin_loss INTEGER NOT NULL DEFAULT 0",
             "note": "ALTER TABLE recharge_cards ADD COLUMN note TEXT",
         }
-        for col, sql in migrations.items():
-            if col not in cols:
+        for col, sql in card_migrations.items():
+            if col not in card_cols:
                 con.execute(sql)
+        customer_cols = {r["name"] for r in con.execute("PRAGMA table_info(customers)").fetchall()}
+        customer_migrations = {
+            "balance_machine_minutes": "ALTER TABLE customers ADD COLUMN balance_machine_minutes INTEGER NOT NULL DEFAULT 0",
+            "balance_machine_rounds": "ALTER TABLE customers ADD COLUMN balance_machine_rounds INTEGER NOT NULL DEFAULT 0",
+            "balance_absolute_minutes": "ALTER TABLE customers ADD COLUMN balance_absolute_minutes INTEGER NOT NULL DEFAULT 0",
+            "balance_absolute_rounds": "ALTER TABLE customers ADD COLUMN balance_absolute_rounds INTEGER NOT NULL DEFAULT 0",
+        }
+        added_customer_balance_cols = False
+        for col, sql in customer_migrations.items():
+            if col not in customer_cols:
+                con.execute(sql)
+                added_customer_balance_cols = True
+        if added_customer_balance_cols:
+            # Existing installations only had one balance bucket. Preserve it
+            # as machine balance instead of incorrectly showing it in both
+            # machine and absolute buckets.
+            con.execute(
+                """UPDATE customers
+                   SET balance_machine_minutes=balance_minutes,
+                       balance_machine_rounds=balance_rounds,
+                       balance_absolute_minutes=0,
+                       balance_absolute_rounds=0
+                   WHERE balance_machine_minutes=0
+                     AND balance_absolute_minutes=0
+                     AND (balance_minutes<>0 OR balance_rounds<>0)"""
+            )
 
 
 SCHEMA_SQL = """
@@ -84,6 +110,10 @@ CREATE TABLE IF NOT EXISTS customers (
   password_hash TEXT NOT NULL,
   balance_minutes INTEGER NOT NULL DEFAULT 0,
   balance_rounds INTEGER NOT NULL DEFAULT 0,
+  balance_machine_minutes INTEGER NOT NULL DEFAULT 0,
+  balance_machine_rounds INTEGER NOT NULL DEFAULT 0,
+  balance_absolute_minutes INTEGER NOT NULL DEFAULT 0,
+  balance_absolute_rounds INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'active',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
