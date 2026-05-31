@@ -128,6 +128,20 @@ class MerchantService:
         with self.db.connect() as con:
             self._log_admin_action_locked(con, admin, action, resource_type, resource_id, metadata)
 
+    def admin_audit_logs(self, *, limit: int = 200) -> list[dict[str, Any]]:
+        with self.db.connect() as con:
+            rows = con.execute(
+                """SELECT * FROM admin_audit_logs
+                   ORDER BY id DESC LIMIT ?""",
+                (max(1, min(int(limit or 200), 1000)),),
+            ).fetchall()
+        out = []
+        for r in rows:
+            item = dict(r)
+            item["metadata"] = loads(item.pop("metadata_json", "{}"), {})
+            out.append(item)
+        return out
+
     def bridge_config_view(self) -> dict[str, Any]:
         settings = self.get_settings()
         with self.db.connect() as con:
@@ -860,10 +874,10 @@ class MerchantService:
         qmarks = ",".join("?" for _ in ACTIVE_ORDER_STATUSES)
         return con.execute(
             f"""SELECT o.*, b.control_session_id, b.fencing_token, b.last_device_epoch, b.id AS binding_id
-                FROM local_orders o JOIN order_control_bindings b ON b.local_order_id=o.id
-                WHERE b.device_id=? AND o.status IN ({qmarks})
+                FROM local_orders o LEFT JOIN order_control_bindings b ON b.local_order_id=o.id
+                WHERE (b.device_id=? OR o.manual_device_id=?) AND o.status IN ({qmarks})
                 ORDER BY o.id DESC LIMIT 1""",
-            (int(device_id), *sorted(ACTIVE_ORDER_STATUSES)),
+            (int(device_id), int(device_id), *sorted(ACTIVE_ORDER_STATUSES)),
         ).fetchone()
 
     def admin_list_devices(self) -> list[dict[str, Any]]:
@@ -885,11 +899,13 @@ class MerchantService:
         with self.db.connect() as con:
             qmarks = ",".join("?" for _ in ACTIVE_ORDER_STATUSES)
             rows = con.execute(
-                f"""SELECT o.*, c.username AS customer_username, b.device_id, b.control_session_id, b.last_device_epoch
+                f"""SELECT o.*, c.username AS customer_username,
+                           COALESCE(b.device_id,o.manual_device_id) AS device_id,
+                           b.control_session_id, b.last_device_epoch
                     FROM local_orders o
-                    JOIN order_control_bindings b ON b.local_order_id=o.id
+                    LEFT JOIN order_control_bindings b ON b.local_order_id=o.id
                     JOIN customers c ON c.id=o.customer_id
-                    WHERE o.status IN ({qmarks})
+                    WHERE o.status IN ({qmarks}) AND COALESCE(b.device_id,o.manual_device_id) IS NOT NULL
                     ORDER BY o.id DESC""",
                 tuple(sorted(ACTIVE_ORDER_STATUSES)),
             ).fetchall()
@@ -908,7 +924,7 @@ class MerchantService:
                 "device_id": did,
                 "device_name": d.get("display_name") or d.get("device_name") or f"{did}号机",
                 "online": bool(d.get("online", True)),
-                "control_state": d.get("control_state") or d.get("state") or ("busy" if active else "idle"),
+                "control_state": (active.get("status") if active else None) or d.get("control_state") or d.get("state") or "idle",
                 "agent_state": d.get("agent_state") or d.get("ui_state") or "",
                 "ui_state": d.get("ui_state") or "",
                 "active_order": self._admin_order_view(active) if active else None,
@@ -965,9 +981,9 @@ class MerchantService:
                     raise MerchantError("manual_device_has_active_order", "该设备手动订单尚未结束", 409)
                 order_no = self._new_order_no()
                 cur = con.execute(
-                    """INSERT INTO local_orders(customer_id,status,local_order_no,requested_minutes,requested_rounds,team_code,quality,amount_cents,created_at,updated_at)
-                       VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                    (customer_id, "claiming_device", order_no, requested_minutes, requested_rounds, team_code, quality, 0, now_s, now_s),
+                    """INSERT INTO local_orders(customer_id,status,local_order_no,requested_minutes,requested_rounds,team_code,quality,manual_device_id,amount_cents,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                    (customer_id, "claiming_device", order_no, requested_minutes, requested_rounds, team_code, quality, device_id, 0, now_s, now_s),
                 )
                 order_id = int(cur.lastrowid)
                 self._log_admin_action_locked(con, admin, "manual_order_create", "device", device_id, {"order_id": order_id, "minutes": requested_minutes, "team_code": team_code, "quality": quality})

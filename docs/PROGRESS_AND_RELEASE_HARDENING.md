@@ -135,3 +135,46 @@ python -m pytest -q
 - 建议用反向代理启用 HTTPS，并给 `/merchant-admin`、`/setup` 做访问源限制或二次认证。
 - 如果要支持“强制接管其他系统/中央超管 session”，应在中央 Bridge 暴露专门 audited takeover API；商户端不要伪造 admin_force 覆盖旧 session。
 - 如 200+ 并发写入频繁，建议从 SQLite 平滑迁移 PostgreSQL；当前 100-200 在线统计与普通下单规模可用 WAL 支撑。
+
+## 7. 2026-06-01 继续加固补充
+
+### 7.1 首启配置入口扩大到全站
+
+- 首启未配置 Bridge API Key 时，不只后台登录页，访问 `/`、客户登录/API 登录等业务入口也会被拦截。
+- HTML GET 跳转 `/setup`；API/POST 返回 `428 setup_required`。
+- 放行范围仅：`/setup`、`/api/setup/*`、`/health`、静态资源和 favicon。
+
+### 7.2 安全响应头与登录限流
+
+- 全站响应增加：
+  - `X-Content-Type-Options: nosniff`
+  - `X-Frame-Options: DENY`
+  - `Referrer-Policy: same-origin`
+  - `Permissions-Policy` 禁用相机/麦克风/地理定位。
+- 登录、注册、setup 保存等敏感 POST 增加轻量内存限流，防止上线后被撞库/刷接口。
+
+### 7.3 设备手动下单并发锁
+
+- `local_orders` 增加 `manual_device_id`。
+- 增加唯一索引 `idx_one_live_manual_order_per_device`，保证同一设备同一时间只能有一个活动手动订单。
+- 手动订单在 Bridge claim 前就写入 `manual_device_id`，堵住并发双击/多管理员同时手动下单造成的重复占用窗口。
+
+### 7.4 权限与审计可视化
+
+- Bridge 配置、设备直控、管理员手动下单、管理员换队要求 `owner` 权限。
+- 后台新增“审计日志”页面，可查看敏感动作、资源、操作者和 metadata。
+- 新增接口：`GET /api/admin/audit-logs`。
+
+### 7.5 设备直控按钮补强
+
+设备直控页在活动订单设备上补充旧版常见维护动作：
+
+- 停止
+- 准备
+- 观战
+- 切观战
+- 重启备用
+- 清理
+- 换队
+
+这些动作仍然只对商户本地持有的 active control session 生效，不跨 session 强制接管。

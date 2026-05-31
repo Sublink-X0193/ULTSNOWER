@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import secrets
 import string
+import time as time_mod
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -76,6 +77,38 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     app.state.bridge = bridge
     app.state.service = service
     app.state.worker_task = None
+    rate_buckets: dict[str, list[float]] = {}
+
+    def setup_exempt_path(path: str) -> bool:
+        return path in {"/setup", "/api/setup/status", "/api/setup/bridge", "/health", "/favicon.ico"} or path.startswith("/static/")
+
+    def too_many_attempts(key: str, *, limit: int = 40, window_seconds: int = 300) -> bool:
+        now = time_mod.monotonic()
+        rows = [t for t in rate_buckets.get(key, []) if now - t < window_seconds]
+        if len(rows) >= limit:
+            rate_buckets[key] = rows
+            return True
+        rows.append(now)
+        rate_buckets[key] = rows
+        return False
+
+    @app.middleware("http")
+    async def hardening_middleware(request: Request, call_next):
+        path = request.url.path
+        if service.bridge_setup_required() and not setup_exempt_path(path):
+            if path.startswith("/api/") or request.method.upper() != "GET":
+                return json_fail("setup_required", "请先完成 Bridge API Key 首次配置", 428)
+            return RedirectResponse("/setup", status_code=303)
+        if request.method.upper() == "POST" and path in {"/api/login", "/api/night-login", "/api/register", "/api/admin/login", "/login", "/merchant-admin/login", "/api/setup/bridge"}:
+            host = request.client.host if request.client else "unknown"
+            if too_many_attempts(f"{host}:{path}", limit=60 if path == "/api/register" else 40, window_seconds=300):
+                return json_fail("rate_limited", "请求过于频繁，请稍后再试", 429)
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "same-origin")
+        response.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+        return response
 
     @app.get("/favicon.ico", include_in_schema=False)
     def favicon() -> Response:
@@ -116,6 +149,11 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         admin = service.admin_from_session(request.cookies.get("merchant_admin_session"))
         if not admin:
             raise MerchantError("admin_login_required", "请先登录商户后台", 401)
+        return admin
+
+    def require_owner_admin(admin: dict[str, Any]) -> dict[str, Any]:
+        if str(admin.get("role") or "") != "owner":
+            raise MerchantError("permission_denied", "该操作需要 owner 权限", 403)
         return admin
 
     def maybe_admin(request: Request) -> dict[str, Any] | None:
@@ -324,6 +362,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
             # First-run setup is still guarded by the local admin password so a
             # random LAN visitor cannot bind the merchant server to their key.
             admin = service.authenticate_admin(body.get("admin_username") or settings.default_admin_username, body.get("admin_password") or "")
+        require_owner_admin(admin)
         cfg = service.update_bridge_config(
             admin,
             base_url=body.get("bridge_base_url") or body.get("base_url") or "",
@@ -703,8 +742,14 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         devices = service.admin_list_devices()
         return json_ok(devices=devices, total=len(devices))
 
+    @app.get("/api/admin/audit-logs")
+    def api_admin_audit_logs(limit: int = 200, _admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        logs = service.admin_audit_logs(limit=limit)
+        return json_ok(logs=logs, total=len(logs))
+
     @app.post("/api/admin/manual-order")
     def api_admin_manual_order(request: Request, body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
         mode = str(body.get("selected_mode") or body.get("mode") or "").strip().lower()
         quality = body.get("quality") or ("secret" if mode in {"absolute", "secret", "绝密"} else "standard")
         order = service.admin_manual_order(
@@ -720,11 +765,13 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
 
     @app.post("/api/admin/manual-rejoin/{order_id}")
     def api_admin_manual_rejoin(order_id: int, body: dict[str, Any] = Body(default_factory=dict), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
         order = service.admin_rejoin_order(admin, order_id, body.get("boss_name") or body.get("team_code") or "")
         return json_ok(msg="管理员换队指令已下发", order=order)
 
     @app.post("/api/admin/devices/{device_id}/command")
     def api_admin_device_command(device_id: int, body: dict[str, Any] = Body(default_factory=dict), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
         result = service.admin_device_command(admin, device_id, action=body.get("action") or "", params=body.get("params") if isinstance(body.get("params"), dict) else {})
         return json_ok(msg="设备指令已下发", **result)
 
@@ -1354,6 +1401,7 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
     <div class="nav-tab" data-tab="cards">充值卡</div>
     <div class="nav-tab" data-tab="equipment">装备配置</div>
     <div class="nav-tab" data-tab="orders">订单管理</div>
+    <div class="nav-tab" data-tab="audit">审计日志</div>
     <div class="nav-tab" data-tab="settings">系统设置</div>
   </div>
   <div class="content">
@@ -1447,6 +1495,12 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
         <button class="btn-sm btn-gray" onclick="loadOrders()">搜索</button>
       </div>
       <div id="ordersTable"></div>
+    </div>
+
+    <div id="tab-audit" class="tab-panel">
+      <div class="section-header"><span class="section-title">权限与敏感操作审计</span><button class="btn-sm btn-primary" onclick="loadAuditLogs()">刷新审计</button></div>
+      <div class="hint" style="margin-bottom:10px">记录 Bridge API Key 配置、管理员手动下单、设备直控、管理员换队等敏感动作，便于上线后追责。</div>
+      <div id="auditTable"></div>
     </div>
 
     <!-- ===== 系统设置 ===== -->
@@ -1819,6 +1873,7 @@ function showTab(name) {
   if (name === 'cards') loadCards();
   if (name === 'equipment') loadEquipmentConfig();
   if (name === 'orders') loadOrders();
+  if (name === 'audit') loadAuditLogs();
   if (name === 'settings') loadSettings();
 }
 document.querySelectorAll('.nav-tab').forEach(t => t.addEventListener('click', () => showTab(t.dataset.tab)));
@@ -2003,7 +2058,10 @@ function renderDevicesAdmin(rows) {
         ${o ? `<button class="btn-sm btn-primary" onclick="openAdminRejoin(${o.id}, decodeURIComponent('${encodeURIComponent(o.team_code || '')}'))">换队</button>
                <button class="btn-sm btn-danger" onclick="sendDeviceCommand(${d.id}, 'stop_current')">停止</button>
                <button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'ready')">准备</button>
-               <button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'watch')">观战</button>` : ''}
+               <button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'watch')">观战</button>
+               <button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'switch_spectate')">切观战</button>
+               <button class="btn-sm btn-amber" onclick="sendDeviceCommand(${d.id}, 'restart_backup')">重启备用</button>
+               <button class="btn-sm btn-purple" onclick="sendDeviceCommand(${d.id}, 'cleanup')">清理</button>` : ''}
       </td>
     </tr>`;
   }).join('') + '</tbody></table>';
@@ -2273,6 +2331,18 @@ async function orderDetail(id) {
     <tr><th>失败原因</th><td colspan="3">${esc(o.fail_reason || '-')}</td></tr>
   </tbody></table>`;
   openModal('orderDetailModal');
+}
+async function loadAuditLogs() {
+  const d = await api('/api/admin/audit-logs?limit=300');
+  const rows = d.logs || [];
+  if (!rows.length) { $('auditTable').innerHTML = '<div class="empty-state">暂无审计记录</div>'; return; }
+  $('auditTable').innerHTML = `<table class="data-table"><thead><tr>
+    <th>ID</th><th>时间</th><th>管理员</th><th>动作</th><th>资源</th><th>详情</th>
+  </tr></thead><tbody>` + rows.map(l => `<tr>
+    <td>${esc(l.id)}</td><td>${fmtDate(l.created_at)}</td><td>${esc(l.admin_username || '-')}</td>
+    <td><span class="badge badge-purple">${esc(l.action)}</span></td><td>${esc(l.resource_type)} #${esc(l.resource_id || '-')}</td>
+    <td><pre style="white-space:pre-wrap;margin:0;font-size:11px">${esc(JSON.stringify(l.metadata || {}, null, 2))}</pre></td>
+  </tr>`).join('') + '</tbody></table>';
 }
 function toggleNightTimeRange() {
   const enabled = document.getElementById('settingNightTimeCheck').checked;

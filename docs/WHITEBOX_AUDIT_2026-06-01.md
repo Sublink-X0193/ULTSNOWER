@@ -56,3 +56,32 @@ python -m pytest -q
 
 3. **生产配置**  
    需要部署前替换默认管理员密码、Bridge API Secret、MERCHANT_REF_SECRET，并启用 HTTPS。
+
+## 2026-06-01 追加白盒自查
+
+### 本次追加变更
+
+- 增加 setup 全站拦截 middleware。
+- 增加安全响应头与敏感 POST 限流。
+- 增加 `manual_device_id` 和同设备活动手动订单唯一索引。
+- 增加 owner 权限检查。
+- 增加审计日志查询接口与后台页面。
+- 增加设备直控维护按钮：切观战、重启备用、清理。
+
+### 追加审计结论
+
+- [x] 首启未配置时，`/` 会跳转 `/setup`，API 登录返回 `428 setup_required`。
+- [x] `/api/setup/bridge` 仍要求本地管理员密码，并进一步校验 owner 角色。
+- [x] 同设备并发手动下单被数据库唯一索引和业务检查双重保护。
+- [x] 直控 action 仍在后端白名单内，前端新增按钮不会绕过白名单。
+- [x] 敏感动作可从后台“审计日志”查看。
+- [x] 登录/注册/setup POST 有轻量限流；不会影响已有测试场景。
+
+### 追加验证
+
+```text
+python -m compileall -q src tests
+python -m pytest -q
+```
+
+结果：21 passed。

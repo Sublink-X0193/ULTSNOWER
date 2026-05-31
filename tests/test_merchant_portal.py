@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from merchant_portal_server.app import create_app
 from merchant_portal_server.bridge_client import BridgeClientError
 from merchant_portal_server.db import Database, iso, utcnow
-from merchant_portal_server.service import MerchantService
+from merchant_portal_server.service import MerchantError, MerchantService
 
 
 class FakeBridge:
@@ -715,6 +715,12 @@ def test_customer_online_uses_token_or_active_order_and_records_activity(app_and
 def test_setup_wizard_bridge_config_requires_admin_password(tmp_path):
     app = create_app(db_path=tmp_path / "setup.sqlite")
     client = TestClient(app)
+    root = client.get("/", follow_redirects=False)
+    assert root.status_code == 303
+    assert root.headers["location"] == "/setup"
+    blocked_api = client.post("/api/login", json={"username": "x", "password": "y"})
+    assert blocked_api.status_code == 428
+    assert blocked_api.json()["error"] == "setup_required"
     login = client.get("/merchant-admin/login", follow_redirects=False)
     assert login.status_code == 303
     assert login.headers["location"] == "/setup"
@@ -758,9 +764,36 @@ def test_admin_order_analytics_devices_and_manual_order(app_and_bridge):
     stop = admin.post("/api/admin/devices/1/command", json={"action": "stop_current"})
     assert stop.status_code == 200, stop.text
     assert bridge.commands[-1]["action"] == "stop_current"
+    logs = admin.get("/api/admin/audit-logs").json()["logs"]
+    assert any(l["action"] == "manual_order_create" for l in logs)
+    assert any(l["action"] == "device_command" for l in logs)
 
     analytics = admin.get("/api/admin/order-analytics?period=day").json()["analytics"]
     assert analytics["order_count"] >= 1
     assert analytics["requested_minutes"] >= 30
     assert analytics["daily_series"]
     assert analytics["customer_rank"]
+
+
+def test_manual_order_same_device_concurrency_guard(tmp_path):
+    bridge = FakeBridge(capacity=1)
+    db = Database(tmp_path / "manual-guard.sqlite")
+    service = MerchantService(db, bridge)
+    service.ensure_default_admin("admin", "admin123456")
+    admin = service.authenticate_admin("admin", "admin123456")
+
+    def place(i: int):
+        try:
+            return ("ok", service.admin_manual_order(admin, device_id=1, requested_minutes=5, requested_rounds=0, team_code=f"MNL{i:03d}", quality="standard"))
+        except MerchantError as e:
+            return ("err", e.code)
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        results = list(pool.map(place, range(6)))
+
+    ok = [r for r in results if r[0] == "ok"]
+    err = [r for r in results if r[0] == "err"]
+    assert len(ok) == 1
+    assert len(err) == 5
+    assert all(code in {"device_has_active_order", "manual_device_has_active_order"} for _, code in err)
+    assert len(service.admin_list_orders(status="waiting_ready_timer")) == 1
