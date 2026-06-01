@@ -722,6 +722,9 @@ def test_legacy_customer_login_portal_and_api_compatibility(app_and_bridge):
     assert devices["ok"] is True
     assert devices["devices"]
     assert devices["devices"][0]["work_status"] == "空闲"
+    assert devices["capacity"]["capacity_label"] == "many"
+    assert devices["capacity"]["capacity_text"] == "空闲较多"
+    assert len(devices["capacity"]["idle_device_ids"]) == 3
 
     order = client.post("/api/order", json={"boss_name": "ABC1234", "mode": "machine"})
     assert order.status_code == 200, order.text
@@ -980,6 +983,9 @@ def test_admin_device_code_and_mode_management(app_and_bridge):
         "restartBackupPC",
         "updateDevice",
         "collectLog",
+        "#devicesTable .dropdown-menu",
+        "z-index: 3000",
+        "overflow: visible",
     ]:
         assert snippet in html
 
@@ -1009,6 +1015,32 @@ def test_admin_device_code_and_mode_management(app_and_bridge):
     logs = admin.get("/api/admin/audit-logs").json()["logs"]
     assert any(l["action"] == "device_create" for l in logs)
     assert any(l["action"] == "device_mode_update" for l in logs)
+
+
+def test_customer_capacity_full_and_few_match_device_status(tmp_path):
+    bridge = FakeBridge(capacity=2)
+    app = create_app(db_path=tmp_path / "capacity.sqlite", bridge_client=bridge)
+    client = TestClient(app)
+    client.get("/api/captcha")
+    captcha = (client.cookies.get("merchant_register_captcha") or "").split(":", 1)[0]
+    assert client.post("/api/register", json={"username": "cap_user", "password": "123456", "captcha": captcha}).status_code == 200
+
+    few = client.get("/api/devices/status").json()
+    assert few["capacity"]["capacity_label"] == "few"
+    assert few["capacity"]["capacity_text"] == "空闲较少"
+    assert len([d for d in few["devices"] if d["work_status"] == "空闲"]) == 2
+
+    bridge.idle = []
+    for d in bridge.devices.values():
+        d["online"] = True
+        d["control_state"] = "commanding"
+        d["agent_state"] = "已进队"
+        d["runtime"] = {"work_status": "已进队", "end_time_ms": 2000000000000}
+    full = client.get("/api/devices/status").json()
+    assert full["capacity"]["capacity_label"] == "full"
+    assert full["capacity"]["capacity_text"] == "满机"
+    assert full["capacity"]["available"] is False
+    assert full["capacity"]["idle_device_ids"] == []
 
 
 def test_admin_devices_reuse_legacy_runtime_fields(app_and_bridge):

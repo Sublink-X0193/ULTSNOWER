@@ -516,8 +516,9 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         return json_ok(content=merchant_settings.get("announcement_text") if merchant_settings.get("announcement_enabled") else "")
 
     @app.get("/api/capacity")
-    def api_capacity(_customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
-        return json_ok(capacity=service.bridge.get_capacity())
+    def api_capacity(customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
+        status = _legacy_devices_status(service, customer)
+        return json_ok(capacity=status["capacity"])
 
     @app.get("/api/devices/status")
     def api_devices_status(customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
@@ -1261,11 +1262,154 @@ def _legacy_order_view(order: dict[str, Any] | None, settings: dict[str, Any] | 
     }
 
 
+def _to_int(value: Any, default: int = 0) -> int:
+    try:
+        if value in (None, ""):
+            return default
+        return int(float(value))
+    except Exception:
+        return default
+
+
+def _legacy_mode_label(mode: Any) -> str:
+    mode_s = str(mode or "machine")
+    if mode_s == "absolute":
+        return "绝密"
+    if mode_s == "hybrid":
+        return "混合"
+    return "机密"
+
+
+def _legacy_epoch_seconds(value: Any) -> int:
+    if isinstance(value, (int, float)):
+        return int(value / 1000) if value > 100000000000 else int(value)
+    parsed = parse_ts(str(value)) if value else None
+    return int(parsed.timestamp()) if parsed else 0
+
+
+def _legacy_epoch_ms(value: Any) -> int:
+    if isinstance(value, (int, float)):
+        return int(value if value > 100000000000 else value * 1000)
+    parsed = parse_ts(str(value)) if value else None
+    return int(parsed.timestamp() * 1000) if parsed else 0
+
+
+def _legacy_available_devices(devices: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    out: list[dict[str, Any]] = []
+    for d in devices:
+        if d.get("enabled") is False:
+            continue
+        if not d.get("online"):
+            continue
+        if d.get("running_order_id"):
+            continue
+        if str(d.get("work_status") or "") != "空闲":
+            continue
+        cooldown = _to_int(d.get("cooldown_until_ms"), 0)
+        if cooldown and cooldown > now_ms:
+            continue
+        out.append(d)
+    return out
+
+
+def _capacity_from_legacy_devices(devices: list[dict[str, Any]]) -> dict[str, Any]:
+    enabled = [d for d in devices if d.get("enabled") is not False]
+    idle = _legacy_available_devices(enabled)
+    label = "many" if len(idle) >= 3 else ("few" if idle else "full")
+    text = {"many": "空闲较多", "few": "空闲较少", "full": "满机"}[label]
+    earliest = 0
+    for d in enabled:
+        end_ms = _to_int(d.get("end_time_ms"), 0)
+        if end_ms > int(datetime.now(timezone.utc).timestamp() * 1000):
+            earliest = end_ms if not earliest else min(earliest, end_ms)
+    return {
+        "available": bool(idle),
+        "capacity_label": label,
+        "capacity_text": text,
+        "idle_count": len(idle),
+        "total_count": len(enabled),
+        "idle_device_ids": [int(d.get("id") or 0) for d in idle if int(d.get("id") or 0) > 0],
+        "full_hint": "" if idle else ("距离最近下机还有一段时间" if earliest else "当前无空闲机器"),
+        "earliest_end_time_ms": earliest,
+    }
+
+
 def _legacy_devices_status(service: Any, customer: dict[str, Any]) -> dict[str, Any]:
     settings = service.get_settings()
     devices: list[dict[str, Any]] = []
     used_ids: set[int] = set()
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+
+    try:
+        admin_devices = service.admin_list_devices()
+    except Exception:
+        admin_devices = []
+    if admin_devices:
+        for d in admin_devices:
+            if d.get("enabled") is False:
+                continue
+            did = int(d.get("id") or d.get("device_id") or 0)
+            if did <= 0:
+                continue
+            mode = d.get("mode") or d.get("device_mode") or "machine"
+            work_status = str(d.get("work_status") or ("空闲" if d.get("online") else "离线"))
+            end_ms = _to_int(d.get("end_time_ms"), 0) or _legacy_epoch_ms(d.get("end_time"))
+            remaining_minutes = _to_int(d.get("remaining_minutes"), 0)
+            remaining_seconds = _to_int(d.get("remaining_seconds"), remaining_minutes * 60)
+            devices.append({
+                "id": did,
+                "name": d.get("device_name") or d.get("name") or f"{did}号机",
+                "device_name": d.get("device_name") or d.get("name") or f"{did}号机",
+                "device_key": d.get("device_key") or d.get("machine_id") or "",
+                "machine_id": d.get("machine_id") or d.get("device_key") or "",
+                "mode": mode,
+                "mode_label": _legacy_mode_label(mode),
+                "enabled": d.get("enabled") is not False,
+                "work_status": work_status,
+                "running_order_id": d.get("running_order_id"),
+                "running_user_id": d.get("running_user_id"),
+                "running_user": d.get("running_user") or d.get("active_customer") or "",
+                "running_boss_name": d.get("running_boss_name") or d.get("team_code") or d.get("boss_name") or "",
+                "remaining_minutes": remaining_minutes,
+                "remaining_seconds": remaining_seconds,
+                "end_time": _legacy_epoch_seconds(d.get("end_time")) or int(end_ms / 1000) if end_ms else 0,
+                "end_time_ms": end_ms,
+                "cooldown_until_ms": _to_int(d.get("cooldown_until_ms"), 0),
+                "harvard": d.get("harvard") or "",
+                "hfb_value": _to_int(d.get("hfb_value"), 0),
+                "spectate_boss": d.get("spectate_boss") or d.get("boss_id") or "",
+                "boss_id_debug": d.get("boss_id_debug") or "",
+                "round_count": _to_int(d.get("round_count"), 0),
+                "run_rounds": _to_int(d.get("run_rounds"), 0),
+                "max_rounds": _to_int(d.get("max_rounds"), 0),
+                "radar_url": d.get("radar_url") or settings.get("global_radar_url") or "",
+                "online": bool(d.get("online")),
+                "last_heartbeat_at": d.get("last_heartbeat_at") or "",
+                "heartbeat_age_seconds": d.get("heartbeat_age_seconds"),
+                "state": d.get("state") or d.get("agent_state") or ("idle" if work_status == "空闲" else work_status),
+                "sub_state": d.get("sub_state") or "",
+                "work_status_detail": d.get("work_status_detail") or work_status,
+                "current_map": d.get("current_map") or "",
+                "prison_stage": d.get("prison_stage") or "",
+                "prison_stage_label": d.get("prison_stage_label") or "",
+                "prison_point": d.get("prison_point") or "",
+                "prison_action": d.get("prison_action") or "",
+                "prison_score": d.get("prison_score"),
+                "prison_match": d.get("prison_match") or "",
+                "prison_region": d.get("prison_region") or "",
+            })
+        devices.sort(key=lambda d: (0 if d.get("running_user_id") == customer.get("id") else 1, 0 if d.get("work_status") == "空闲" else 1, int(d.get("id") or 0)))
+        capacity = _capacity_from_legacy_devices(devices)
+        return {
+            "devices": devices,
+            "capacity": capacity,
+            "privacy_mode": bool(settings.get("privacy_mode_enabled")),
+            "privacy_skip_balance": max(0, int(settings.get("privacy_skip_balance") or 0)),
+            "maintenance_mode": bool(settings.get("maintenance_mode_enabled")),
+            "maintenance_message": settings.get("maintenance_message") or "系统正在维护中，暂停接受新订单。请稍后再试。" if settings.get("maintenance_mode_enabled") else "",
+            "server_time_ms": now_ms,
+        }
 
     try:
         orders = service.admin_list_orders(limit=1000)
@@ -1360,8 +1504,10 @@ def _legacy_devices_status(service: Any, customer: dict[str, Any]) -> dict[str, 
         })
 
     devices.sort(key=lambda d: (0 if d.get("running_user_id") == customer.get("id") else 1, 0 if d.get("work_status") == "空闲" else 1, int(d.get("id") or 0)))
+    capacity = _capacity_from_legacy_devices(devices)
     return {
         "devices": devices,
+        "capacity": capacity,
         "privacy_mode": bool(settings.get("privacy_mode_enabled")),
         "privacy_skip_balance": max(0, int(settings.get("privacy_skip_balance") or 0)),
         "maintenance_mode": bool(settings.get("maintenance_mode_enabled")),
@@ -1585,6 +1731,8 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
     .stat-value { font-size:26px; font-weight:800; color:#111827; }
     .panel { background:#fff; border:1px solid #e5e7eb; border-radius:12px; padding:16px; box-shadow:0 1px 3px rgba(0,0,0,.04); }
     table.data-table { width:100%; border-collapse:collapse; background:#fff; border-radius:10px; overflow:hidden; box-shadow:0 1px 3px rgba(0,0,0,.04); }
+    #devicesTable, #devicesTable .data-table, #devicesTable .data-table tbody, #devicesTable .data-table tr, #devicesTable .data-table td { overflow: visible; }
+    #devicesTable .dropdown-menu { z-index: 3000; }
     .data-table th,.data-table td { padding:10px 12px; text-align:left; font-size:13px; border-bottom:1px solid #f3f4f6; vertical-align:middle; }
     .data-table th { background:#f9fafb; color:#6b7280; font-weight:600; font-size:12px; }
     .data-table tbody tr:hover { background:#f8fafc; }
@@ -1703,8 +1851,20 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
 
     <div id="tab-devices" class="tab-panel">
       <div class="section-header">
-        <span class="section-title">设备直控 / 管理员手动下单</span>
-        <div><button class="btn-sm btn-primary" onclick="openAddDeviceModal()">+ 添加设备</button><button class="btn-sm btn-gray" onclick="loadDevicesAdmin()">刷新设备</button></div>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <span class="section-title">设备直控 / 管理员手动下单</span>
+          <span id="deviceStatusBadge" style="font-size:14px;color:#6b7280;background:#f3f4f6;border-radius:20px;padding:4px 14px;display:inline-flex;align-items:center;gap:6px;"></span>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <label style="font-size:13px;color:#6b7280;display:inline-flex;align-items:center;gap:4px;">排序
+            <select id="deviceSortMode" onchange="onDeviceSortChange()" style="padding:5px 8px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;background:#fff;">
+              <option value="name">机器号</option>
+              <option value="idle_first">空闲优先</option>
+            </select>
+          </label>
+          <button class="btn-sm btn-primary" onclick="openAddDeviceModal()">+ 添加设备</button>
+          <button class="btn-sm btn-gray" onclick="loadDevicesAdmin(true)">🔄 刷新</button>
+        </div>
       </div>
       <div class="hint" style="margin-bottom:10px">设备新增、机器模式切换、设备码绑定都通过中央 Bridge API Key 执行；直控仍走 control session + fencing token + command queue。</div>
       <div id="devicesTable"></div>
@@ -2473,8 +2633,8 @@ async function deleteCustomer(id, name='') {
   } catch(e) { toast(e.message); }
 }
 
-async function loadDevicesAdmin() {
-  const d = await api('/api/admin/devices');
+async function loadDevicesAdmin(forceRefresh=false) {
+  const d = await api('/api/admin/devices' + (forceRefresh ? '?force_refresh=1' : ''));
   renderDevicesAdmin(d.devices || []);
 }
 function deviceModeBadge(mode, runningMode='') {
@@ -2530,7 +2690,36 @@ function deviceDetailHtml(d) {
   const meta = [d.prison_action, d.prison_point, d.prison_match, d.prison_region, d.current_map].filter(Boolean).map(esc).join(' · ');
   return `<div style="line-height:1.5;min-width:120px;"><span class="badge badge-purple">${esc(detailMain || '详情')}</span>${meta ? `<div class="hint" style="max-width:190px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${meta}">${meta}</div>` : ''}</div>`;
 }
+function getDeviceSortMode() { return $('deviceSortMode')?.value || 'name'; }
+function sortDevicesForAdmin(rows) {
+  const items = (rows || []).slice();
+  const byName = (a, b) => (parseInt(a.device_name || a.name || a.id) || Number(a.id || 0)) - (parseInt(b.device_name || b.name || b.id) || Number(b.id || 0));
+  if (getDeviceSortMode() === 'idle_first') {
+    const rank = d => (d.work_status === '空闲' ? 0 : (d.online ? 1 : 2));
+    items.sort((a, b) => rank(a) - rank(b) || byName(a, b));
+  } else {
+    items.sort(byName);
+  }
+  return items;
+}
+function updateDeviceStatusBadge(rows) {
+  const badge = $('deviceStatusBadge');
+  if (!badge) return;
+  const statusCount = {};
+  (rows || []).forEach(d => { const s = d.work_status || (d.online ? '未知' : '离线'); statusCount[s] = (statusCount[s] || 0) + 1; });
+  const colors = {'空闲':'#16a34a','已进队':'#2563eb','配装中':'#2563eb','游戏中':'#2563eb','执行中':'#2563eb','离线':'#ef4444','不在线':'#ef4444','已结束':'#6b7280','等待救援':'#d97706','进队异常':'#dc2626','进队失败':'#dc2626'};
+  const parts = Object.entries(statusCount).map(([s,n]) => `<span style="color:${colors[s] || '#6b7280'};font-weight:600;">${esc(s)}</span> <span>${esc(n)}</span>`);
+  const total = (rows || []).length;
+  const enabled = (rows || []).filter(d => d.enabled !== false).length;
+  const online = (rows || []).filter(d => d.online).length;
+  parts.push(`<span style="color:#6b7280;">|</span> <span style="color:#374151;">在线</span> <b style="color:#3b82f6;">${online}/${total}</b>`);
+  parts.push(`<span style="color:#374151;">启用</span> <b style="color:#3b82f6;">${enabled}/${total}</b>`);
+  badge.innerHTML = parts.join('<span style="color:#d1d5db;">·</span>');
+}
+function onDeviceSortChange() { loadDevicesAdmin(); }
 function renderDevicesAdmin(rows) {
+  rows = sortDevicesForAdmin(rows || []);
+  updateDeviceStatusBadge(rows);
   if (!rows.length) { $('devicesTable').innerHTML = '<div class="empty-state">暂无设备；请先在 /setup 配置 Bridge API Key，并确认中央 Bridge 已有 Agent 或点击添加设备。</div>'; return; }
   $('devicesTable').innerHTML = `<table class="data-table"><thead><tr>
     <th>ID</th><th>名称/设备码</th><th>模式</th><th>在线</th><th>工作状态</th><th>详情</th>

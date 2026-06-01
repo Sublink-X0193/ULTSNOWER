@@ -405,3 +405,9 @@ python -m pytest -q
 - 商户后台“设备直控”表已按旧版列恢复：ID、名称/设备码、模式、在线、工作状态、详情、上机用户、剩余时长、预计结束、哈币、老板ID、已打局、已打币、版本、启用、操作。
 - 中央 Bridge 新增 `devices.runtime_json`，Agent 心跳会上报并保存旧版运行态字段：`work_status`、`spectate_boss/boss_id`、`harvard/hfb_value`、局数、币损、脚本版本、地图和监狱路线详情。
 - 商户服务器通过 API Key 读取 Bridge 设备后复用这些运行态字段，不再重新设计一套单薄状态表。
+
+### 10.4 设备总览与客户容量口径对齐
+
+- `/api/devices/status` 改为优先复用商户后台 `admin_list_devices()` 的设备运行态，客户界面和设备直控看到的是同一批设备、同一套在线/空闲/已进队/离线口径。
+- `/api/capacity` 不再直接裸透 Bridge capacity，而是从同一份设备状态计算 `many/few/full`、`空闲较多/空闲较少/满机`、空闲设备 ID 和满机提示，避免客户界面“较多/较少/满机”和后台设备状态不一致。
+- 设备直控表的下拉菜单增加 `#devicesTable` overflow 覆盖和更高 z-index，避免被表格圆角/overflow 裁剪遮挡。
