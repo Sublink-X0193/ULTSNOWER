@@ -78,3 +78,8 @@ BODY_SHA256
   - 商户后台配置。
   - 包夜卡使用/充值时由商户服务器本地校验。
   - 不需要传给中央 Bridge。
+
+## 当前接口文档
+
+完整接口表、请求/响应字段、事件、状态机见：[docs/CENTRAL_BRIDGE_API.md](CENTRAL_BRIDGE_API.md)。
+
