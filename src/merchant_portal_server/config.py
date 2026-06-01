@@ -18,6 +18,9 @@ class Settings:
     bind_port: int = int(os.getenv("MERCHANT_PORT", "8020"))
     default_admin_username: str = os.getenv("MERCHANT_ADMIN_USERNAME", "admin")
     default_admin_password: str = os.getenv("MERCHANT_ADMIN_PASSWORD", "admin123456")
+    # 测试/拆分联调阶段默认不强制首启 Bridge API Key 配置；
+    # 正式部署时设置 MERCHANT_REQUIRE_BRIDGE_SETUP=1 才会拦截全站进入 /setup。
+    require_bridge_setup: bool = os.getenv("MERCHANT_REQUIRE_BRIDGE_SETUP", "0") in {"1", "true", "TRUE", "yes"}
 
 
 def load_settings() -> Settings:

@@ -232,6 +232,39 @@ python -m pytest -q
 
 结果：23 passed。
 
+## 8. 2026-06-01 测试期首次配置调整
+
+- `MERCHANT_REQUIRE_BRIDGE_SETUP` 默认改为 `0`，测试/联调阶段不再强制全站跳转 `/setup`。
+- 正式上线需要强制首启 API Key 时，设置：
+
+```text
+MERCHANT_REQUIRE_BRIDGE_SETUP=1
+```
+
+- `/setup` 页面保留，可手动打开。
+- 首次配置页已合并“全局设置”与 Bridge API Key：
+  - 前台名称显示
+  - 默认机密局数/小时
+  - 绝密局数/小时
+  - 包夜时间限制
+  - 隐私模式与跳过余额
+  - ACE/白嫖检测
+  - 维护模式与维护文案
+  - 公告内容
+  - 全局雷达/备注地址
+  - 绝密最大配装价值、是否允许自定义配装
+  - 中央 Bridge 地址 / Merchant Key / Merchant Secret
+- 测试期 API Key 可留空，只保存全局设置；正式强制模式下仍要求填完整 Bridge Key/Secret。
+
+最新验证：
+
+```text
+python -m compileall -q src tests
+python -m pytest -q
+```
+
+结果：24 passed。
+
 ## 8. 2026-06-01 旧版直控/手动下单兼容补强
 
 ### 8.1 手动下单弹窗向旧版靠齐

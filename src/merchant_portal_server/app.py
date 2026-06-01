@@ -83,6 +83,9 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     def setup_exempt_path(path: str) -> bool:
         return path in {"/setup", "/api/setup/status", "/api/setup/bridge", "/health", "/favicon.ico"} or path.startswith("/static/")
 
+    def setup_required_effective() -> bool:
+        return bool(settings.require_bridge_setup and service.bridge_setup_required())
+
     def too_many_attempts(key: str, *, limit: int = 40, window_seconds: int = 300) -> bool:
         now = time_mod.monotonic()
         rows = [t for t in rate_buckets.get(key, []) if now - t < window_seconds]
@@ -105,7 +108,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     @app.middleware("http")
     async def hardening_middleware(request: Request, call_next):
         path = request.url.path
-        if service.bridge_setup_required() and not setup_exempt_path(path):
+        if setup_required_effective() and not setup_exempt_path(path):
             if path.startswith("/api/") or request.method.upper() != "GET":
                 return json_fail("setup_required", "请先完成 Bridge API Key 首次配置", 428)
             return RedirectResponse("/setup", status_code=303)
@@ -225,6 +228,15 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         out["system_name_placeholder"] = st.get("system_name") or "SNOW 自助下单"
         return out
 
+    def setup_config_view() -> dict[str, Any]:
+        cfg = service.bridge_config_view()
+        raw_required = bool(cfg.get("setup_required"))
+        cfg["setup_required_raw"] = raw_required
+        cfg["setup_enforced"] = bool(settings.require_bridge_setup)
+        cfg["setup_required"] = bool(settings.require_bridge_setup and raw_required)
+        cfg["settings"] = admin_settings_view(service.get_settings())
+        return cfg
+
     @app.get("/health")
     def health() -> dict[str, Any]:
         return json_ok(service="merchant_portal", version="0.1.0")
@@ -310,7 +322,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
 
     @app.get("/merchant-admin/login", response_class=HTMLResponse)
     def admin_login_page() -> HTMLResponse:
-        if service.bridge_setup_required():
+        if setup_required_effective():
             return RedirectResponse("/setup", status_code=303)  # type: ignore[return-value]
         return HTMLResponse(_layout("商户后台登录", _form("/merchant-admin/login", [("username", "管理员"), ("password", "密码", "password")], "登录")))
 
@@ -360,14 +372,12 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     @app.get("/setup", response_class=HTMLResponse)
     def setup_page(request: Request) -> HTMLResponse:
         admin = maybe_admin(request)
-        cfg = service.bridge_config_view()
-        if not cfg["setup_required"] and not admin:
-            return RedirectResponse("/merchant-admin/login", status_code=303)  # type: ignore[return-value]
+        cfg = setup_config_view()
         return HTMLResponse(_setup_html(cfg, require_admin_password=not bool(admin)))
 
     @app.get("/api/setup/status")
     def api_setup_status() -> dict[str, Any]:
-        return json_ok(**service.bridge_config_view())
+        return json_ok(**setup_config_view())
 
     @app.post("/api/setup/bridge")
     def api_setup_bridge(request: Request, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
@@ -377,22 +387,32 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
             # random LAN visitor cannot bind the merchant server to their key.
             admin = service.authenticate_admin(body.get("admin_username") or settings.default_admin_username, body.get("admin_password") or "")
         require_owner_admin(admin)
-        cfg = service.update_bridge_config(
-            admin,
-            base_url=body.get("bridge_base_url") or body.get("base_url") or "",
-            merchant_key=body.get("bridge_merchant_key") or body.get("merchant_key") or "",
-            merchant_secret=body.get("bridge_merchant_secret") or body.get("merchant_secret") or "",
-        )
-        if bridge_client is None:
-            try:
-                if hasattr(service.bridge, "close"):
-                    service.bridge.close()
-            except Exception:
-                pass
-            new_bridge = BridgeClient(cfg["bridge_base_url"], cfg["bridge_merchant_key"], body.get("bridge_merchant_secret") or body.get("merchant_secret") or "")
-            service.bridge = new_bridge
-            app.state.bridge = new_bridge
-        return json_ok(msg="Bridge API Key 已保存", bridge=service.bridge_config_view(), redirect="/merchant-admin/login")
+        raw_settings_payload = body.get("settings") if isinstance(body.get("settings"), dict) else body
+        settings_payload = normalize_admin_settings_payload(raw_settings_payload)
+        if settings_payload:
+            service.update_settings(admin["id"], settings_payload)
+        base_url = body.get("bridge_base_url") or body.get("base_url") or ""
+        merchant_key = body.get("bridge_merchant_key") or body.get("merchant_key") or ""
+        merchant_secret = body.get("bridge_merchant_secret") or body.get("merchant_secret") or ""
+        has_bridge_credentials = bool(str(merchant_key or "").strip() or str(merchant_secret or "").strip())
+        if has_bridge_credentials or setup_required_effective():
+            cfg = service.update_bridge_config(
+                admin,
+                base_url=base_url,
+                merchant_key=merchant_key,
+                merchant_secret=merchant_secret,
+            )
+            if bridge_client is None:
+                try:
+                    if hasattr(service.bridge, "close"):
+                        service.bridge.close()
+                except Exception:
+                    pass
+                new_bridge = BridgeClient(cfg["bridge_base_url"], cfg["bridge_merchant_key"], merchant_secret)
+                service.bridge = new_bridge
+                app.state.bridge = new_bridge
+        msg = "首次配置已保存" if not has_bridge_credentials else "全局设置与 Bridge API Key 已保存"
+        return json_ok(msg=msg, bridge=setup_config_view(), settings=admin_settings_view(service.get_settings()), redirect="/merchant-admin/login")
 
     # JSON API
     @app.post("/api/register")
@@ -964,44 +984,105 @@ def _pre(value: Any) -> str:
 
 
 def _setup_html(cfg: dict[str, Any], *, require_admin_password: bool = True) -> str:
+    st = cfg.get("settings") if isinstance(cfg.get("settings"), dict) else {}
+
+    def checked(key: str) -> str:
+        value = st.get(key)
+        truth = value is True or str(value).strip().lower() in {"1", "true", "yes", "on", "y"}
+        return "checked" if truth else ""
+
     admin_fields = """
       <label>管理员用户名<input id="adminUsername" value="admin" autocomplete="username"></label>
       <label>管理员密码<input id="adminPassword" type="password" autocomplete="current-password" placeholder="输入本地管理员密码"></label>
     """ if require_admin_password else "<div class='hint'>已登录管理员，会直接保存到本地配置。</div>"
+    skip_button = "" if cfg.get("setup_enforced") else """<button class="btn-secondary" onclick="location.href='/merchant-admin/login'">测试期跳过 API Key，进入后台登录</button>"""
+    setup_note = "正式模式：必须填入 Bridge API Key 后才能进入业务页面。" if cfg.get("setup_enforced") else "测试期间：当前不强制填写 API Key；可先保存全局设置，Bridge Key/Secret 留空。"
     return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>首次配置 Bridge API Key</title>
+    <title>首次配置 Bridge API Key / 全局设置</title>
     <style>
-    body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;background:#eef2ff;min-height:100vh;margin:0;display:flex;align-items:center;justify-content:center;color:#111827}}
-    .card{{width:min(560px,94vw);background:#fff;border-radius:18px;box-shadow:0 24px 80px rgba(30,64,175,.18);padding:28px}}
-    h1{{margin:0 0 8px;font-size:22px}} p{{color:#64748b;line-height:1.7}} label{{display:block;font-size:13px;font-weight:700;margin:14px 0 6px;color:#374151}}
-    input{{width:100%;height:42px;border:1px solid #cbd5e1;border-radius:10px;padding:0 12px;font:inherit}}
-    button{{margin-top:18px;width:100%;height:44px;border:0;border-radius:10px;background:#2563eb;color:#fff;font-weight:800;cursor:pointer}}
-    .hint{{font-size:12px;color:#64748b;margin-top:8px;line-height:1.6}} .ok{{background:#ecfdf5;color:#047857;border:1px solid #a7f3d0;padding:10px;border-radius:10px;margin:10px 0}}
+    *{{box-sizing:border-box}} body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;background:#eef2ff;min-height:100vh;margin:0;color:#111827;padding:28px}}
+    .card{{width:min(980px,96vw);background:#fff;border-radius:18px;box-shadow:0 24px 80px rgba(30,64,175,.18);padding:28px;margin:0 auto}}
+    h1{{margin:0 0 8px;font-size:22px}} h2{{font-size:16px;margin:18px 0 10px}} p{{color:#64748b;line-height:1.7}} label{{display:block;font-size:13px;font-weight:700;margin:10px 0 6px;color:#374151}}
+    input,textarea,select{{width:100%;border:1px solid #cbd5e1;border-radius:10px;padding:0 12px;font:inherit;background:#fff}} input,select{{height:42px}} textarea{{min-height:84px;padding-top:10px;resize:vertical}}
+    .grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px 16px}} .full{{grid-column:1/-1}} .switch{{display:flex;align-items:center;gap:8px;margin:10px 0;color:#374151;font-weight:700}} .switch input{{width:auto;height:auto}}
+    .section{{border:1px solid #e5e7eb;border-radius:14px;padding:16px;margin-top:14px;background:#fbfdff}}
+    button{{margin-top:18px;width:100%;height:44px;border:0;border-radius:10px;background:#2563eb;color:#fff;font-weight:800;cursor:pointer}} .btn-secondary{{background:#64748b}}
+    .hint{{font-size:12px;color:#64748b;margin-top:8px;line-height:1.6}} .banner{{background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;padding:10px;border-radius:10px;margin:10px 0}} .ok{{background:#ecfdf5;color:#047857;border:1px solid #a7f3d0;padding:10px;border-radius:10px;margin:10px 0}}
     .err{{background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;padding:10px;border-radius:10px;margin:10px 0}}
+    @media(max-width:760px){{.grid{{grid-template-columns:1fr}} body{{padding:12px}}}}
     </style></head><body><div class="card">
-      <h1>{_escape(cfg.get("system_name") or "商户服务器")} · 首次配置</h1>
-      <p>请填入中央 Bridge 分配给本商户的 API Key/Secret。保存后商户服务器才会调用中央设备控制接口；配置会写入本地数据库。</p>
+      <h1>{_escape(st.get("system_name") or cfg.get("system_name") or "商户服务器")} · 首次配置 Bridge API Key / 全局设置</h1>
+      <div class="banner">{_escape(setup_note)}</div>
       <div id="msg"></div>
-      {admin_fields}
-      <label>中央 Bridge 地址<input id="bridgeBaseUrl" value="{_escape(cfg.get("bridge_base_url") or "http://127.0.0.1:8010")}" placeholder="http://127.0.0.1:8010"></label>
-      <label>Merchant Key<input id="bridgeKey" value="{_escape(cfg.get("bridge_merchant_key") if cfg.get("bridge_merchant_key") != "mk_test" else "")}" placeholder="mk_xxx"></label>
-      <label>Merchant Secret<input id="bridgeSecret" type="password" placeholder="中央生成的 Secret"></label>
-      <div class="hint">安全自检：此页面保存后不会在界面回显 Secret；后续修改需要管理员登录。</div>
-      <button onclick="save()">保存并进入后台</button>
+      <div class="section">
+        <h2>本地管理员验证</h2>
+        {admin_fields}
+      </div>
+      <div class="section">
+        <h2>中央 Bridge / API Key 地址</h2>
+        <div class="grid">
+          <div class="full"><label>中央 Bridge 地址 / API Key 填入地址<input id="bridgeBaseUrl" value="{_escape(cfg.get("bridge_base_url") or "http://127.0.0.1:8010")}" placeholder="http://127.0.0.1:8010"></label></div>
+          <div><label>Merchant Key<input id="bridgeKey" value="{_escape(cfg.get("bridge_merchant_key") if cfg.get("bridge_merchant_key") != "mk_test" else "")}" placeholder="mk_xxx"></label></div>
+          <div><label>Merchant Secret<input id="bridgeSecret" type="password" placeholder="中央生成的 Secret；测试期可留空"></label></div>
+        </div>
+        <div class="hint">Secret 保存后不会在界面回显；测试期留空时不会更新 Bridge 配置。</div>
+      </div>
+      <div class="section">
+        <h2>全局设置</h2>
+        <div class="grid">
+          <div class="full"><label>前台名称显示<input id="settingSystemName" value="{_escape(st.get("system_name") or "")}" placeholder="例如：七元电竞"></label></div>
+          <div><label>默认机密局数/小时<input id="settingLimitRounds" type="number" min="0" value="{_escape(st.get("default_limit_rounds") or 4)}"></label></div>
+          <div><label>绝密局数/小时<input id="settingAbsoluteRoundsPerHour" type="number" min="0" value="{_escape(st.get("absolute_rounds_per_hour") or 3)}"></label></div>
+          <div><label>包夜开始时间<input id="settingNightStartTime" type="time" value="{_escape(st.get("night_start_time") or "22:50")}"></label></div>
+          <div><label>包夜结束时间<input id="settingNightEndTime" type="time" value="{_escape(st.get("night_end_time") or "06:10")}"></label></div>
+          <div><label>隐私模式跳过余额阈值<input id="settingPrivacySkipBalance" type="number" min="0" value="{_escape(st.get("privacy_skip_balance") or 0)}"></label></div>
+          <div><label>绝密最大配装价值 W<input id="settingMaxLoadoutCost" type="number" min="0" value="{_escape(st.get("max_loadout_cost") or 65)}"></label></div>
+          <div class="full"><label>全局雷达/备注地址<input id="settingGlobalRadarUrl" value="{_escape(st.get("global_radar_url") or "")}" placeholder="可留空"></label></div>
+          <div class="full"><label>维护文案<textarea id="settingMaintenanceMessage" placeholder="维护时展示给客户">{_escape(st.get("maintenance_message") or "")}</textarea></label></div>
+          <div class="full"><label>公告内容<textarea id="settingAnnouncementText" placeholder="前台公告">{_escape(st.get("announcement_text") or "")}</textarea></label></div>
+        </div>
+        <label class="switch"><input id="settingNightTimeCheck" type="checkbox" {checked("night_time_check")}> 启用包夜卡登录时间限制</label>
+        <label class="switch"><input id="settingPrivacyMode" type="checkbox" {checked("privacy_mode_enabled")}> 启用隐私模式</label>
+        <label class="switch"><input id="settingAceEnabled" type="checkbox" {checked("ace_enabled")}> 启用 ACE/白嫖检测</label>
+        <label class="switch"><input id="settingAllowCustomLoadout" type="checkbox" {checked("allow_custom_loadout")}> 允许客户自定义绝密配装</label>
+        <label class="switch"><input id="settingMaintenanceMode" type="checkbox" {checked("maintenance_mode_enabled")}> 平台维护模式</label>
+        <label class="switch"><input id="settingAnnouncementEnabled" type="checkbox" {checked("announcement_enabled")}> 启用公告栏</label>
+      </div>
+      <button onclick="save()">保存全局设置 / API Key</button>
+      {skip_button}
     </div><script>
+    const $ = id => document.getElementById(id);
     async function save(){{
       const payload={{
-        admin_username: document.getElementById('adminUsername')?.value || '',
-        admin_password: document.getElementById('adminPassword')?.value || '',
-        bridge_base_url: document.getElementById('bridgeBaseUrl').value.trim(),
-        bridge_merchant_key: document.getElementById('bridgeKey').value.trim(),
-        bridge_merchant_secret: document.getElementById('bridgeSecret').value.trim(),
+        admin_username: $('adminUsername')?.value || '',
+        admin_password: $('adminPassword')?.value || '',
+        bridge_base_url: $('bridgeBaseUrl').value.trim(),
+        bridge_merchant_key: $('bridgeKey').value.trim(),
+        bridge_merchant_secret: $('bridgeSecret').value.trim(),
+        settings: {{
+          system_name: $('settingSystemName').value.trim(),
+          default_limit_rounds: Number($('settingLimitRounds').value || 0),
+          absolute_rounds_per_hour: Number($('settingAbsoluteRoundsPerHour').value || 0),
+          night_time_check: $('settingNightTimeCheck').checked,
+          night_start_time: $('settingNightStartTime').value,
+          night_end_time: $('settingNightEndTime').value,
+          global_radar_url: $('settingGlobalRadarUrl').value.trim(),
+          privacy_mode_enabled: $('settingPrivacyMode').checked,
+          privacy_skip_balance: Number($('settingPrivacySkipBalance').value || 0),
+          ace_enabled: $('settingAceEnabled').checked,
+          maintenance_mode_enabled: $('settingMaintenanceMode').checked,
+          maintenance_message: $('settingMaintenanceMessage').value,
+          announcement_enabled: $('settingAnnouncementEnabled').checked,
+          announcement_text: $('settingAnnouncementText').value,
+          max_loadout_cost: Number($('settingMaxLoadoutCost').value || 0),
+          allow_custom_loadout: $('settingAllowCustomLoadout').checked
+        }}
       }};
       const msg=document.getElementById('msg'); msg.className=''; msg.textContent='保存中...';
       const res=await fetch('/api/setup/bridge',{{method:'POST',headers:{{'Content-Type':'application/json'}},credentials:'same-origin',body:JSON.stringify(payload)}});
       const data=await res.json().catch(()=>({{ok:false,message:'响应解析失败'}}));
       if(!res.ok||data.ok===false){{msg.className='err'; msg.textContent=data.message||data.error||'保存失败'; return;}}
-      msg.className='ok'; msg.textContent='保存成功，正在跳转后台登录...';
+      msg.className='ok'; msg.textContent=data.msg || '保存成功，正在跳转后台登录...';
       setTimeout(()=>location.href=data.redirect||'/merchant-admin/login',700);
     }}
     </script></body></html>"""

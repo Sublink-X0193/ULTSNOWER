@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from merchant_portal_server.app import create_app
 from merchant_portal_server.bridge_client import BridgeClientError
+from merchant_portal_server.config import Settings
 from merchant_portal_server.db import Database, iso, utcnow
 from merchant_portal_server.service import MerchantError, MerchantService
 
@@ -724,8 +725,36 @@ def test_customer_online_uses_token_or_active_order_and_records_activity(app_and
     assert stats["order_minutes"] == 10
 
 
-def test_setup_wizard_bridge_config_requires_admin_password(tmp_path):
+def test_setup_wizard_skipped_by_default_for_testing(tmp_path):
     app = create_app(db_path=tmp_path / "setup.sqlite")
+    client = TestClient(app)
+    root = client.get("/", follow_redirects=False)
+    assert root.status_code in {200, 303}
+    assert root.headers.get("location") != "/setup"
+    status = client.get("/api/setup/status").json()
+    assert status["setup_enforced"] is False
+    assert status["setup_required"] is False
+    setup_html = client.get("/setup").text
+    assert "首次配置 Bridge API Key / 全局设置" in setup_html
+    assert "测试期跳过 API Key" in setup_html
+    saved = client.post(
+        "/api/setup/bridge",
+        json={
+            "admin_username": "admin",
+            "admin_password": "admin123456",
+            "bridge_base_url": "http://127.0.0.1:8010",
+            "settings": {"system_name": "七元电竞", "privacy_mode_enabled": True, "default_limit_rounds": 6},
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    public_settings = client.get("/api/public/settings").json()["settings"]
+    assert public_settings["system_name"] == "七元电竞"
+    assert public_settings["privacy_mode_enabled"] is True
+    assert client.get("/api/setup/status").json()["configured"] is False
+
+
+def test_setup_wizard_bridge_config_requires_admin_password_when_enforced(tmp_path):
+    app = create_app(db_path=tmp_path / "setup-enforced.sqlite", settings=Settings(require_bridge_setup=True))
     client = TestClient(app)
     root = client.get("/", follow_redirects=False)
     assert root.status_code == 303
@@ -737,7 +766,9 @@ def test_setup_wizard_bridge_config_requires_admin_password(tmp_path):
     assert login.status_code == 303
     assert login.headers["location"] == "/setup"
     setup_html = client.get("/setup").text
-    assert "首次配置 Bridge API Key" in setup_html
+    assert "首次配置 Bridge API Key / 全局设置" in setup_html
+    assert "前台名称显示" in setup_html
+    assert "中央 Bridge 地址 / API Key 填入地址" in setup_html
     bad = client.post(
         "/api/setup/bridge",
         json={"admin_username": "admin", "admin_password": "bad", "bridge_base_url": "http://127.0.0.1:8010", "bridge_merchant_key": "mk_live", "bridge_merchant_secret": "secret-live"},
@@ -745,13 +776,23 @@ def test_setup_wizard_bridge_config_requires_admin_password(tmp_path):
     assert bad.status_code == 401
     ok = client.post(
         "/api/setup/bridge",
-        json={"admin_username": "admin", "admin_password": "admin123456", "bridge_base_url": "http://127.0.0.1:8010", "bridge_merchant_key": "mk_live", "bridge_merchant_secret": "secret-live"},
+        json={
+            "admin_username": "admin",
+            "admin_password": "admin123456",
+            "bridge_base_url": "http://127.0.0.1:8010",
+            "bridge_merchant_key": "mk_live",
+            "bridge_merchant_secret": "secret-live",
+            "settings": {"system_name": "七元电竞", "maintenance_mode_enabled": True},
+        },
     )
     assert ok.status_code == 200, ok.text
     status = client.get("/api/setup/status").json()
     assert status["configured"] is True
     assert status["setup_required"] is False
     assert status["bridge_merchant_secret_set"] is True
+    public_settings = client.get("/api/public/settings").json()["settings"]
+    assert public_settings["system_name"] == "七元电竞"
+    assert public_settings["maintenance_mode_enabled"] is True
 
 
 def test_admin_order_analytics_devices_and_manual_order(app_and_bridge):

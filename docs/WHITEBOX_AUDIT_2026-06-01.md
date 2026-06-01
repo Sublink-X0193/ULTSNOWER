@@ -159,3 +159,31 @@ python -m pytest -q
 ```
 
 结果：23 passed。
+
+## 2026-06-01 首次配置测试期调整审计
+
+### 追加变更
+
+- 新增配置项 `MERCHANT_REQUIRE_BRIDGE_SETUP`。
+- 默认值为 `0`：测试期间不强制首启 API Key 配置，不再给业务入口制造阻塞。
+- 正式部署设置为 `1` 后，恢复原有全站拦截 `/setup` 行为。
+- `/setup` 页面合并全局设置和 Bridge API Key 字段。
+- `/api/setup/bridge` 支持只保存全局设置；只有填写 Key/Secret 或强制模式开启时才校验并保存 Bridge 配置。
+
+### 白盒检查
+
+- [x] 默认测试模式下 `/` 不再被强制跳转 `/setup`。
+- [x] 强制模式下 `/`、`/merchant-admin/login`、业务 API 仍会被 setup middleware 拦截。
+- [x] `/setup` 仍要求本地 owner 管理员密码，不能匿名改全局配置或绑定 Bridge Key。
+- [x] 测试期 Key/Secret 留空不会写入半截 Bridge 配置，`configured=false`。
+- [x] 强制模式下 Key/Secret 缺失仍会报错，避免正式部署漏配。
+- [x] Secret 仍不回显，只返回 `bridge_merchant_secret_set`。
+
+### 验证
+
+```text
+python -m compileall -q src tests
+python -m pytest -q
+```
+
+结果：24 passed。
