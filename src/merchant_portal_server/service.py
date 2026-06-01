@@ -102,6 +102,43 @@ class MerchantService:
             (key, dumps(value), iso(), admin_id),
         )
 
+    def _log_audit_locked(
+        self,
+        con: sqlite3.Connection,
+        *,
+        actor_type: str,
+        actor_id: Any = None,
+        actor_username: str | None = None,
+        action: str,
+        resource_type: str,
+        resource_id: Any = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        actor_type = str(actor_type or "system").strip().lower()
+        if actor_type not in {"admin", "customer", "system", "guest"}:
+            actor_type = "system"
+        admin_id = int(actor_id) if actor_type == "admin" and actor_id is not None else None
+        admin_username = str(actor_username or "") if actor_type == "admin" and actor_username else None
+        actor_id_i = int(actor_id) if actor_id is not None else None
+        con.execute(
+            """INSERT INTO admin_audit_logs(
+                 admin_id,admin_username,actor_type,actor_id,actor_username,
+                 action,resource_type,resource_id,metadata_json,created_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (
+                admin_id,
+                admin_username,
+                actor_type,
+                actor_id_i,
+                str(actor_username or "") if actor_username is not None else None,
+                action,
+                resource_type,
+                str(resource_id) if resource_id is not None else None,
+                dumps(metadata or {}),
+                iso(),
+            ),
+        )
+
     def _log_admin_action_locked(
         self,
         con: sqlite3.Connection,
@@ -111,23 +148,49 @@ class MerchantService:
         resource_id: Any = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        con.execute(
-            """INSERT INTO admin_audit_logs(admin_id,admin_username,action,resource_type,resource_id,metadata_json,created_at)
-               VALUES(?,?,?,?,?,?,?)""",
-            (
-                int(admin["id"]) if admin and admin.get("id") is not None else None,
-                str(admin.get("username") or "") if admin else None,
-                action,
-                resource_type,
-                str(resource_id) if resource_id is not None else None,
-                dumps(metadata or {}),
-                iso(),
-            ),
+        self._log_audit_locked(
+            con,
+            actor_type="admin" if admin else "system",
+            actor_id=(admin.get("id") if admin else None),
+            actor_username=(str(admin.get("username") or "") if admin else None),
+            action=action,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            metadata=metadata,
+        )
+
+    def _log_customer_action_locked(
+        self,
+        con: sqlite3.Connection,
+        customer_id: int | None,
+        username: str | None,
+        action: str,
+        resource_type: str,
+        resource_id: Any = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self._log_audit_locked(
+            con,
+            actor_type="customer",
+            actor_id=customer_id,
+            actor_username=username,
+            action=action,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            metadata=metadata,
         )
 
     def log_admin_action(self, admin: dict[str, Any] | None, action: str, resource_type: str, resource_id: Any = None, metadata: dict[str, Any] | None = None) -> None:
         with self.db.connect() as con:
             self._log_admin_action_locked(con, admin, action, resource_type, resource_id, metadata)
+
+    def log_customer_action(self, customer_id: int | None, username: str | None, action: str, resource_type: str, resource_id: Any = None, metadata: dict[str, Any] | None = None) -> None:
+        with self.db.connect() as con:
+            self._log_customer_action_locked(con, customer_id, username, action, resource_type, resource_id, metadata)
+
+    def log_audit_event(self, actor_type: str, actor_id: Any, actor_username: str | None, action: str, resource_type: str, resource_id: Any = None, metadata: dict[str, Any] | None = None) -> None:
+        with self.db.connect() as con:
+            self._log_audit_locked(con, actor_type=actor_type, actor_id=actor_id, actor_username=actor_username, action=action, resource_type=resource_type, resource_id=resource_id, metadata=metadata)
 
     def admin_audit_logs(self, *, limit: int = 200) -> list[dict[str, Any]]:
         with self.db.connect() as con:
@@ -140,6 +203,9 @@ class MerchantService:
         for r in rows:
             item = dict(r)
             item["metadata"] = loads(item.pop("metadata_json", "{}"), {})
+            item["actor_type"] = item.get("actor_type") or ("admin" if item.get("admin_id") is not None else "system")
+            item["actor_id"] = item.get("actor_id") if item.get("actor_id") is not None else item.get("admin_id")
+            item["actor_username"] = item.get("actor_username") or item.get("admin_username")
             out.append(item)
         return out
 
@@ -315,19 +381,33 @@ class MerchantService:
                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                     (username, hash_password(password), 0, 0, 0, 0, 0, 0, "active", now_s, now_s),
                 )
+                customer_id = int(cur.lastrowid)
+                self._log_customer_action_locked(con, customer_id, username, "customer_register", "customer", customer_id, {"source": "register"})
                 con.commit()
-                return {"id": int(cur.lastrowid), "username": username, "balance_minutes": 0, "balance_rounds": 0}
+                return {"id": customer_id, "username": username, "balance_minutes": 0, "balance_rounds": 0}
             except sqlite3.IntegrityError:
                 con.rollback()
+                self.log_audit_event("customer", None, username, "customer_register_failed", "customer", None, {"reason": "username_exists"})
                 raise MerchantError("username_exists", "用户名已存在", 409)
             except Exception:
                 con.rollback()
                 raise
 
     def authenticate(self, username: str, password: str) -> dict[str, Any]:
+        username = str(username or "").strip()
         with self.db.connect() as con:
-            row = con.execute("SELECT * FROM customers WHERE username=? AND status='active'", (str(username or "").strip(),)).fetchone()
+            row = con.execute("SELECT * FROM customers WHERE username=? AND status='active'", (username,)).fetchone()
             if not row or not verify_password(str(password or ""), row["password_hash"]):
+                self._log_audit_locked(
+                    con,
+                    actor_type="customer",
+                    actor_id=int(row["id"]) if row else None,
+                    actor_username=username,
+                    action="customer_login_failed",
+                    resource_type="auth",
+                    resource_id=username or None,
+                    metadata={"reason": "bad_credentials"},
+                )
                 raise MerchantError("bad_credentials", "用户名或密码错误", 401)
             return self.public_customer(dict(row))
 
@@ -351,7 +431,10 @@ class MerchantService:
         if not sid:
             return
         with self.db.connect() as con:
+            row = con.execute("SELECT customer_id,username FROM sessions WHERE sid=?", (sid,)).fetchone()
             con.execute("DELETE FROM sessions WHERE sid=?", (sid,))
+            if row:
+                self._log_customer_action_locked(con, int(row["customer_id"]), row["username"], "customer_logout", "session", None, {})
 
     def customer_from_session(self, sid: str | None, *, renew: bool = True) -> dict[str, Any] | None:
         if not sid:
@@ -547,6 +630,16 @@ class MerchantService:
                 order=dict(active) if active else None,
                 metadata={"source": source, "active_order_status_at_login": active["status"] if active else "none"},
             )
+            action = "customer_night_login" if source == "night_login" else "customer_login"
+            self._log_customer_action_locked(
+                con,
+                customer_id,
+                row["username"],
+                action,
+                "auth",
+                customer_id,
+                {"source": source, "active_order_status_at_login": active["status"] if active else "none"},
+            )
 
     def _record_order_activity(self, order_id: int, *, event_type: str = "order_created") -> None:
         with self.db.connect() as con:
@@ -565,6 +658,23 @@ class MerchantService:
                 username=row["username"],
                 order=dict(row),
                 metadata={"mode": self._mode_from_quality(row["quality"])},
+            )
+            action = "customer_order_create" if event_type == "order_created" else f"customer_{event_type}"
+            self._log_customer_action_locked(
+                con,
+                int(row["customer_id"]),
+                row["username"],
+                action,
+                "order",
+                int(row["id"]),
+                {
+                    "status": row["status"],
+                    "quality": row["quality"],
+                    "mode": self._mode_from_quality(row["quality"]),
+                    "requested_minutes": int(row["requested_minutes"] or 0),
+                    "requested_rounds": int(row["requested_rounds"] or 0),
+                    "team_code": row["team_code"],
+                },
             )
 
     def admin_activity_stats(self, *, local_date: str | None = None) -> dict[str, Any]:
@@ -1549,6 +1659,16 @@ class MerchantService:
                     "UPDATE local_orders SET status='stopping',fail_reason='customer_stop',updated_at=? WHERE id=?",
                     (now_s, order_id),
                 )
+                customer_row = con.execute("SELECT username FROM customers WHERE id=?", (customer_id,)).fetchone()
+                self._log_customer_action_locked(
+                    con,
+                    customer_id,
+                    customer_row["username"] if customer_row else None,
+                    "customer_order_stop",
+                    "order",
+                    order_id,
+                    {"refund_minutes": refund_minutes, "refund_rounds": refund_rounds},
+                )
                 con.commit()
             except Exception:
                 con.rollback()
@@ -1585,6 +1705,16 @@ class MerchantService:
         if team_code:
             with self.db.connect() as con:
                 con.execute("UPDATE local_orders SET team_code=?,updated_at=? WHERE id=?", (team_code, iso(), order_id))
+                customer_row = con.execute("SELECT username FROM customers WHERE id=?", (customer_id,)).fetchone()
+                self._log_customer_action_locked(
+                    con,
+                    customer_id,
+                    customer_row["username"] if customer_row else None,
+                    "customer_order_rejoin",
+                    "order",
+                    order_id,
+                    {"team_code": team_code},
+                )
         return self.admin_get_order(order_id)
 
     # ---------- merchant admin / settings ----------
@@ -1608,11 +1738,23 @@ class MerchantService:
                 raise
 
     def authenticate_admin(self, username: str, password: str) -> dict[str, Any]:
+        username = str(username or "").strip()
         with self.db.connect() as con:
-            row = con.execute("SELECT * FROM merchant_admins WHERE username=? AND status='active'", (str(username or "").strip(),)).fetchone()
+            row = con.execute("SELECT * FROM merchant_admins WHERE username=? AND status='active'", (username,)).fetchone()
             if not row or not verify_password(str(password or ""), row["password_hash"]):
+                self._log_audit_locked(
+                    con,
+                    actor_type="admin",
+                    actor_id=int(row["id"]) if row else None,
+                    actor_username=username,
+                    action="admin_login_failed",
+                    resource_type="auth",
+                    resource_id=username or None,
+                    metadata={"reason": "bad_credentials"},
+                )
                 raise MerchantError("bad_credentials", "管理员用户名或密码错误", 401)
             con.execute("UPDATE merchant_admins SET last_login_at=?,updated_at=? WHERE id=?", (iso(), iso(), int(row["id"])))
+            self._log_admin_action_locked(con, dict(row), "admin_login", "auth", int(row["id"]), {})
             return self.public_admin(dict(row))
 
     def create_admin_session(self, admin_id: int) -> str:
@@ -1633,7 +1775,10 @@ class MerchantService:
         if not sid:
             return
         with self.db.connect() as con:
+            row = con.execute("SELECT admin_id,username,role FROM admin_sessions WHERE sid=?", (sid,)).fetchone()
             con.execute("DELETE FROM admin_sessions WHERE sid=?", (sid,))
+            if row:
+                self._log_admin_action_locked(con, {"id": int(row["admin_id"]), "username": row["username"]}, "admin_logout", "auth", int(row["admin_id"]), {"role": row["role"]})
 
     def admin_from_session(self, sid: str | None) -> dict[str, Any] | None:
         if not sid:
@@ -2139,6 +2284,21 @@ class MerchantService:
                     "INSERT INTO recharge_records(customer_id,code_hash,minutes,rounds,created_at) VALUES(?,?,?,?,?)",
                     (customer_id, code_hash, minutes, rounds, now_s),
                 )
+                self._log_customer_action_locked(
+                    con,
+                    customer_id,
+                    customer["username"],
+                    "customer_redeem_card",
+                    "recharge_card",
+                    card["code_plain"] or code_hash[:12],
+                    {
+                        "minutes": minutes,
+                        "rounds": rounds,
+                        "mode": mode,
+                        "card_type": card["card_type"] or "normal",
+                        "code_tail": str(code or "")[-4:],
+                    },
+                )
                 con.commit()
                 return {"minutes": minutes, "rounds": rounds, "mode": mode, "card_type": card["card_type"] or "normal", "customer": self.get_customer(customer_id)}
             except Exception:
@@ -2210,6 +2370,21 @@ class MerchantService:
                     "INSERT INTO recharge_records(customer_id,code_hash,minutes,rounds,created_at) VALUES(?,?,?,?,?)",
                     (customer_id, code_hash, minutes, rounds, now_s),
                 )
+                self._log_customer_action_locked(
+                    con,
+                    customer_id,
+                    username,
+                    "customer_night_card_redeem",
+                    "recharge_card",
+                    card["code_plain"] or code_hash[:12],
+                    {
+                        "minutes": minutes,
+                        "rounds": rounds,
+                        "mode": mode,
+                        "card_type": card["card_type"] or "night",
+                        "code_tail": code[-4:],
+                    },
+                )
                 con.commit()
                 return self.get_customer(customer_id)
             except Exception:
@@ -2279,6 +2454,15 @@ class MerchantService:
                 active = self._active_order_row(con, customer_id)
                 if active:
                     result = {"order": self._order_with_binding(con, int(active["id"])), "reused": True}
+                    self._log_customer_action_locked(
+                        con,
+                        customer_id,
+                        customer["username"],
+                        "customer_order_reuse",
+                        "order",
+                        int(active["id"]),
+                        {"status": active["status"], "team_code": active["team_code"]},
+                    )
                     if idempotency_key:
                         con.execute(
                             "INSERT OR REPLACE INTO idempotency_keys(scope,idempotency_key,request_hash,response_json,created_at) VALUES(?,?,?,?,?)",

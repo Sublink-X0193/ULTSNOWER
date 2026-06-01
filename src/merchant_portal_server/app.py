@@ -597,16 +597,19 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     @app.post("/api/order/{order_id}/restart_backup")
     def api_legacy_restart_backup(order_id: int, customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
         service.assert_customer_order(order_id, customer["id"])
+        service.log_customer_action(customer["id"], customer.get("username"), "customer_restart_backup_request", "order", order_id, {})
         return json_ok(msg="备用电脑重启指令已记录")
 
     @app.post("/api/order/{order_id}/switch_spectate")
     def api_legacy_switch_spectate(order_id: int, customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
         service.assert_customer_order(order_id, customer["id"])
+        service.log_customer_action(customer["id"], customer.get("username"), "customer_switch_spectate_request", "order", order_id, {})
         return json_ok(msg="已切换观战")
 
     @app.post("/api/order/{order_id}/switch-device")
     def api_legacy_switch_device(order_id: int, body: dict[str, Any] = Body(default_factory=dict), customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
         order = service.customer_rejoin_order(order_id, customer["id"], body.get("boss_name") or body.get("team_code") or "")
+        service.log_customer_action(customer["id"], customer.get("username"), "customer_switch_device_request", "order", order_id, {"team_code": body.get("boss_name") or body.get("team_code") or ""})
         return json_ok(msg="已记录换机请求；中央 Bridge 会按当前会话保护策略继续执行", order=_legacy_order_view(order, service.get_settings()))
 
     @app.post("/api/recharge/redeem")
@@ -663,19 +666,26 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     @app.put("/api/admin/settings")
     def api_admin_put_settings(body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
         require_owner_admin(admin)
-        return json_ok(settings=admin_settings_view(service.update_settings(admin["id"], normalize_admin_settings_payload(body))))
+        payload = normalize_admin_settings_payload(body)
+        settings_saved = admin_settings_view(service.update_settings(admin["id"], payload))
+        service.log_admin_action(admin, "settings_update", "settings", "global", {"keys": sorted(payload.keys())})
+        return json_ok(settings=settings_saved)
 
     @app.post("/api/admin/settings")
     def api_admin_post_settings(body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
         require_owner_admin(admin)
         payload = body.get("settings") if isinstance(body.get("settings"), dict) else body
-        return json_ok(msg="保存成功", settings=admin_settings_view(service.update_settings(admin["id"], normalize_admin_settings_payload(payload))))
+        normalized = normalize_admin_settings_payload(payload)
+        settings_saved = admin_settings_view(service.update_settings(admin["id"], normalized))
+        service.log_admin_action(admin, "settings_update", "settings", "global", {"keys": sorted(normalized.keys())})
+        return json_ok(msg="保存成功", settings=settings_saved)
 
     @app.post("/api/admin/notice")
     def api_admin_notice(body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
         require_owner_admin(admin)
         content = str(body.get("content") or "")
         service.update_settings(admin["id"], {"announcement_text": content, "announcement_enabled": bool(content.strip())})
+        service.log_admin_action(admin, "notice_update", "settings", "announcement", {"enabled": bool(content.strip()), "length": len(content)})
         return json_ok(msg="保存成功")
 
     @app.get("/api/admin/equipment-config")
@@ -686,6 +696,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     def api_admin_equipment_config_save(body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
         require_owner_admin(admin)
         service.update_equipment_config(admin["id"], body)
+        service.log_admin_action(admin, "equipment_config_update", "equipment", "global", {"equipment_count": len(body.get("equipment") or []) if isinstance(body.get("equipment"), list) else None})
         return json_ok(msg="保存成功", **service.get_equipment_config())
 
     @app.get("/api/admin/cards")
@@ -707,12 +718,15 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
             mode=body.get("mode") or "machine",
             night_coin_loss=int(body.get("night_coin_loss") or 0),
         )
+        service.log_admin_action(admin, "card_generate", "recharge_card", "batch", {"count": len(cards), "minutes": minutes, "rounds": int(body.get("rounds") or body.get("absolute_rounds") or 0), "card_type": body.get("card_type") or "normal", "mode": body.get("mode") or "machine"})
         return json_ok(msg="生成成功", cards=cards)
 
     @app.delete("/api/admin/cards/{code}")
     def api_admin_card_delete(code: str, admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
         require_owner_admin(admin)
-        return json_ok(**service.delete_recharge_card(code))
+        result = service.delete_recharge_card(code)
+        service.log_admin_action(admin, "card_delete", "recharge_card", code, {})
+        return json_ok(**result)
 
     @app.get("/api/admin/cards/export-unused")
     def api_admin_cards_export_unused(type: str = "", _admin: dict[str, Any] = Depends(current_admin)) -> Response:  # noqa: A002 - keep legacy query name
@@ -749,6 +763,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
             balance_rounds=int(body.get("balance_rounds") or 0),
             status=body.get("status") or "active",
         )
+        service.log_admin_action(admin, "customer_create", "customer", customer["id"], {"username": customer["username"], "status": customer.get("status")})
         return json_ok(customer=customer)
 
     @app.put("/api/admin/customers/{customer_id}/balance")
@@ -769,22 +784,29 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
             delta_absolute_minutes=body.get("delta_absolute_minutes") if "delta_absolute_minutes" in body else None,
             delta_absolute_rounds=body.get("delta_absolute_rounds") if "delta_absolute_rounds" in body else None,
         )
+        service.log_admin_action(admin, "customer_balance_update", "customer", customer_id, {k: body.get(k) for k in sorted(body.keys()) if k != "password"})
         return json_ok(customer=customer)
 
     @app.put("/api/admin/customers/{customer_id}/status")
     def api_admin_customer_status(customer_id: int, body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
         require_owner_admin(admin)
-        return json_ok(customer=service.admin_set_customer_status(customer_id, body.get("status") or "active"))
+        customer = service.admin_set_customer_status(customer_id, body.get("status") or "active")
+        service.log_admin_action(admin, "customer_status_update", "customer", customer_id, {"status": customer.get("status")})
+        return json_ok(customer=customer)
 
     @app.put("/api/admin/customers/{customer_id}/password")
     def api_admin_customer_password(customer_id: int, body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
         require_owner_admin(admin)
-        return json_ok(**service.admin_reset_customer_password(customer_id, body.get("password") or "123456"))
+        result = service.admin_reset_customer_password(customer_id, body.get("password") or "123456")
+        service.log_admin_action(admin, "customer_password_reset", "customer", customer_id, {})
+        return json_ok(**result)
 
     @app.delete("/api/admin/customers/{customer_id}")
     def api_admin_customer_delete(customer_id: int, admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
         require_owner_admin(admin)
-        return json_ok(**service.admin_delete_customer(customer_id))
+        result = service.admin_delete_customer(customer_id)
+        service.log_admin_action(admin, "customer_delete", "customer", customer_id, {})
+        return json_ok(**result)
 
     @app.get("/api/admin/orders")
     def api_admin_orders(keyword: str = "", status: str = "", customer_id: int | None = None, _admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
@@ -986,7 +1008,10 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     @app.post("/api/admin/orders/{order_id}/add-time")
     def api_admin_order_add_time(order_id: int, body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
         require_owner_admin(admin)
-        return json_ok(order=service.admin_adjust_order_time(order_id, add_minutes=int(body.get("add_minutes") or 0)))
+        add_minutes = int(body.get("add_minutes") or 0)
+        order = service.admin_adjust_order_time(order_id, add_minutes=add_minutes)
+        service.log_admin_action(admin, "order_time_adjust", "order", order_id, {"add_minutes": add_minutes})
+        return json_ok(order=order)
 
     @app.post("/api/admin/add-time/{order_id}")
     def api_admin_add_time_legacy(order_id: int, body: dict[str, Any] = Body(default_factory=dict), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
@@ -995,12 +1020,16 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         if not add_minutes:
             sign = -1 if str(body.get("op") or body.get("operation") or "").lower() in {"sub", "minus", "subtract"} else 1
             add_minutes = sign * (int(body.get("hours") or 0) * 60 + int(body.get("minutes") or body.get("add_minutes_abs") or 0))
-        return json_ok(order=service.admin_adjust_order_time(order_id, add_minutes=add_minutes), msg="订单时长已调整")
+        order = service.admin_adjust_order_time(order_id, add_minutes=add_minutes)
+        service.log_admin_action(admin, "order_time_adjust", "order", order_id, {"add_minutes": add_minutes})
+        return json_ok(order=order, msg="订单时长已调整")
 
     @app.post("/api/admin/orders/{order_id}/stop")
     def api_admin_order_stop(order_id: int, admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
         require_owner_admin(admin)
-        return json_ok(order=service.admin_stop_order(order_id))
+        order = service.admin_stop_order(order_id)
+        service.log_admin_action(admin, "order_stop", "order", order_id, {})
+        return json_ok(order=order)
 
     @app.post("/internal/workers/events")
     def run_events() -> dict[str, Any]:
@@ -3537,9 +3566,9 @@ async function loadAuditLogs() {
   const rows = d.logs || [];
   if (!rows.length) { $('auditTable').innerHTML = '<div class="empty-state">暂无审计记录</div>'; return; }
   $('auditTable').innerHTML = `<table class="data-table"><thead><tr>
-    <th>ID</th><th>时间</th><th>管理员</th><th>动作</th><th>资源</th><th>详情</th>
+    <th>ID</th><th>时间</th><th>操作者</th><th>动作</th><th>资源</th><th>详情</th>
   </tr></thead><tbody>` + rows.map(l => `<tr>
-    <td>${esc(l.id)}</td><td>${fmtDate(l.created_at)}</td><td>${esc(l.admin_username || '-')}</td>
+    <td>${esc(l.id)}</td><td>${fmtDate(l.created_at)}</td><td><span class="badge ${l.actor_type === 'customer' ? 'badge-machine' : (l.actor_type === 'admin' ? 'badge-purple' : 'badge-offline')}">${esc(l.actor_type || '-')}</span><div>${esc(l.actor_username || l.admin_username || '-')}</div></td>
     <td><span class="badge badge-purple">${esc(l.action)}</span></td><td>${esc(l.resource_type)} #${esc(l.resource_id || '-')}</td>
     <td><pre style="white-space:pre-wrap;margin:0;font-size:11px">${esc(JSON.stringify(l.metadata || {}, null, 2))}</pre></td>
   </tr>`).join('') + '</tbody></table>';

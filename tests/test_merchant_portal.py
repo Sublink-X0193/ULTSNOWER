@@ -816,6 +816,53 @@ def test_customer_online_uses_token_or_active_order_and_records_activity(app_and
     assert stats["order_minutes"] == 10
 
 
+def test_customer_actions_are_written_to_audit_log(app_and_bridge):
+    app, _bridge = app_and_bridge
+    admin = TestClient(app)
+    assert admin.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+
+    user = TestClient(app)
+    user.get("/api/captcha")
+    captcha = (user.cookies.get("merchant_register_captcha") or "").split(":", 1)[0]
+    registered = user.post("/api/register", json={"username": "audit_user", "password": "123456", "captcha": captcha})
+    assert registered.status_code == 200, registered.text
+    customer_id = registered.json()["user_id"]
+
+    assert user.post("/api/logout").status_code == 200
+    assert user.post("/api/login", json={"username": "audit_user", "password": "123456"}).status_code == 200
+    assert TestClient(app).post("/api/login", json={"username": "audit_user", "password": "bad"}).status_code == 401
+
+    app.state.service.add_recharge_card("AUDIT-CARD", minutes=60, rounds=4)
+    assert user.post("/api/recharge", json={"card_code": "AUDIT-CARD"}).status_code == 200
+    order = user.post("/api/orders", json={"requested_minutes": 10, "requested_rounds": 1, "team_code": "AUD123"}).json()["order"]
+    assert user.post(f"/api/order/{order['id']}/rejoin", json={"boss_name": "AUD456"}).status_code == 200
+    assert user.post(f"/api/order/{order['id']}/restart_backup").status_code == 200
+    assert user.post(f"/api/order/{order['id']}/switch_spectate").status_code == 200
+    assert user.post(f"/api/order/{order['id']}/stop").status_code == 200
+    assert user.post("/api/logout").status_code == 200
+
+    logs = admin.get("/api/admin/audit-logs?limit=1000").json()["logs"]
+    customer_logs = [l for l in logs if l.get("actor_type") == "customer" and l.get("actor_id") == customer_id]
+    actions = {l["action"] for l in customer_logs}
+    for action in {
+        "customer_register",
+        "customer_logout",
+        "customer_login",
+        "customer_login_failed",
+        "customer_redeem_card",
+        "customer_order_create",
+        "customer_order_rejoin",
+        "customer_restart_backup_request",
+        "customer_switch_spectate_request",
+        "customer_order_stop",
+    }:
+        assert action in actions
+    order_log = next(l for l in customer_logs if l["action"] == "customer_order_create")
+    assert order_log["resource_type"] == "order"
+    assert order_log["resource_id"] == str(order["id"])
+    assert order_log["metadata"]["team_code"] == "AUD123"
+
+
 def test_setup_wizard_skipped_by_default_for_testing(tmp_path):
     app = create_app(db_path=tmp_path / "setup.sqlite")
     client = TestClient(app)

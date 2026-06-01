@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 def utcnow() -> datetime:
@@ -119,6 +119,25 @@ class Database:
         )
         # Index/table creation is idempotent in SCHEMA_SQL; keep migrations
         # column-only so older SQLite files can be opened safely.
+        audit_cols = {r["name"] for r in con.execute("PRAGMA table_info(admin_audit_logs)").fetchall()}
+        audit_migrations = {
+            "actor_type": "ALTER TABLE admin_audit_logs ADD COLUMN actor_type TEXT NOT NULL DEFAULT 'admin'",
+            "actor_id": "ALTER TABLE admin_audit_logs ADD COLUMN actor_id INTEGER",
+            "actor_username": "ALTER TABLE admin_audit_logs ADD COLUMN actor_username TEXT",
+        }
+        added_audit_cols = False
+        for col, sql in audit_migrations.items():
+            if col not in audit_cols:
+                con.execute(sql)
+                added_audit_cols = True
+        if added_audit_cols:
+            con.execute(
+                """UPDATE admin_audit_logs
+                   SET actor_type=COALESCE(actor_type,'admin'),
+                       actor_id=COALESCE(actor_id,admin_id),
+                       actor_username=COALESCE(actor_username,admin_username)"""
+            )
+        con.execute("CREATE INDEX IF NOT EXISTS idx_admin_audit_actor_created ON admin_audit_logs(actor_type,actor_id,created_at)")
 
 
 SCHEMA_SQL = """
@@ -305,6 +324,9 @@ CREATE TABLE IF NOT EXISTS admin_audit_logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   admin_id INTEGER,
   admin_username TEXT,
+  actor_type TEXT NOT NULL DEFAULT 'admin',
+  actor_id INTEGER,
+  actor_username TEXT,
   action TEXT NOT NULL,
   resource_type TEXT NOT NULL,
   resource_id TEXT,
