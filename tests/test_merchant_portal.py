@@ -20,6 +20,10 @@ class FakeBridge:
     def __init__(self, capacity: int = 3):
         self.lock = threading.Lock()
         self.idle = list(range(1, capacity + 1))
+        self.devices: dict[int, dict[str, Any]] = {
+            i: {"id": i, "device_id": i, "machine_id": f"machine-{i}", "display_name": f"{i}号机", "online": True, "control_state": "idle", "agent_state": "idle", "ui_state": "idle", "mode": "machine", "enabled": True}
+            for i in range(1, capacity + 1)
+        }
         self.sessions: dict[str, dict[str, Any]] = {}
         self.session_requests: list[dict[str, Any]] = []
         self.events_log: list[dict[str, Any]] = []
@@ -47,6 +51,58 @@ class FakeBridge:
         with self.lock:
             n = len(self.idle)
             return {"ok": True, "available": bool(n), "capacity_label": "many" if n >= 3 else ("few" if n else "full"), "idle_device_ids": list(self.idle)}
+
+    def list_devices(self) -> list[dict[str, Any]]:
+        with self.lock:
+            rows = []
+            for did, dev in sorted(self.devices.items()):
+                item = dict(dev)
+                item["online"] = bool(item.get("online", True))
+                item["control_state"] = "idle" if did in self.idle else "busy"
+                rows.append(item)
+            return rows
+
+    def create_device(self, *, machine_id: str, display_name: str, mode: str = "machine", radar_url: str = "", watchdog_card: str = "", idem: str) -> dict[str, Any]:
+        with self.lock:
+            if any(d.get("machine_id") == machine_id for d in self.devices.values()):
+                raise BridgeClientError("machine_id_exists", "机器ID已存在", 409)
+            did = max(self.devices.keys(), default=0) + 1
+            dev = {"id": did, "device_id": did, "machine_id": machine_id, "display_name": display_name, "online": False, "control_state": "offline", "agent_state": "offline", "ui_state": "unknown", "mode": mode, "enabled": True, "radar_url": radar_url, "watchdog_card": watchdog_card}
+            self.devices[did] = dev
+            return dict(dev)
+
+    def update_device(self, device_id: int, *, machine_id: str | None = None, display_name: str | None = None, mode: str | None = None, radar_url: str | None = None, watchdog_card: str | None = None, enabled: bool | None = None, idem: str) -> dict[str, Any]:
+        with self.lock:
+            if int(device_id) not in self.devices:
+                raise BridgeClientError("not_found", "设备不存在", 404)
+            dev = self.devices[int(device_id)]
+            if machine_id is not None:
+                dev["machine_id"] = machine_id
+            if display_name is not None:
+                dev["display_name"] = display_name
+            if mode is not None:
+                dev["mode"] = mode
+            if radar_url is not None:
+                dev["radar_url"] = radar_url
+            if watchdog_card is not None:
+                dev["watchdog_card"] = watchdog_card
+            if enabled is not None:
+                dev["enabled"] = bool(enabled)
+            return dict(dev)
+
+    def set_device_mode(self, device_id: int, mode: str, *, idem: str) -> dict[str, Any]:
+        return self.update_device(device_id, mode=mode, idem=idem)
+
+    def set_device_enabled(self, device_id: int, enabled: bool, *, idem: str) -> dict[str, Any]:
+        return self.update_device(device_id, enabled=enabled, idem=idem)
+
+    def delete_device(self, device_id: int, *, idem: str) -> dict[str, Any]:
+        with self.lock:
+            if int(device_id) not in self.devices:
+                raise BridgeClientError("not_found", "设备不存在", 404)
+            self.devices.pop(int(device_id), None)
+            self.idle = [x for x in self.idle if x != int(device_id)]
+            return {"id": int(device_id), "deleted": True}
 
     def create_control_session(
         self,
@@ -893,6 +949,42 @@ def test_admin_manual_order_modal_matches_legacy_controls(app_and_bridge):
         'function calculateLoadoutCost',
     ]:
         assert snippet in html
+
+
+def test_admin_device_code_and_mode_management(app_and_bridge):
+    app, bridge = app_and_bridge
+    admin = TestClient(app)
+    assert admin.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+    html = admin.get("/merchant-admin").text
+    for snippet in ["openAddDeviceModal", "submitDevice", "switchMode", "toggleDevice", "机器ID / 设备码"]:
+        assert snippet in html
+
+    created = admin.post("/api/admin/devices", json={"device_name": "新设备", "device_key": "new-machine-code", "mode": "hybrid", "radar_url": "https://radar.local/x", "watchdog_card": "wd-1"})
+    assert created.status_code == 200, created.text
+    dev = created.json()["device"]
+    assert dev["machine_id"] == "new-machine-code"
+    assert dev["mode"] == "hybrid"
+
+    mode = admin.put(f"/api/admin/devices/{dev['id']}/mode", json={"mode": "absolute"})
+    assert mode.status_code == 200, mode.text
+    assert bridge.devices[dev["id"]]["mode"] == "absolute"
+
+    edited = admin.put(f"/api/admin/devices/{dev['id']}", json={"device_name": "新设备B", "device_key": "new-machine-code-b", "mode": "machine"})
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["device"]["machine_id"] == "new-machine-code-b"
+    assert edited.json()["device"]["display_name"] == "新设备B"
+
+    toggled = admin.put(f"/api/admin/devices/{dev['id']}/toggle", json={"enabled": False})
+    assert toggled.status_code == 200, toggled.text
+    assert bridge.devices[dev["id"]]["enabled"] is False
+
+    deleted = admin.delete(f"/api/admin/devices/{dev['id']}")
+    assert deleted.status_code == 200, deleted.text
+    assert dev["id"] not in bridge.devices
+
+    logs = admin.get("/api/admin/audit-logs").json()["logs"]
+    assert any(l["action"] == "device_create" for l in logs)
+    assert any(l["action"] == "device_mode_update" for l in logs)
 
 
 def test_admin_manual_order_infers_device_mode_like_legacy_payload(tmp_path):

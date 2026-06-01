@@ -787,6 +787,49 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         devices = service.admin_list_devices()
         return json_ok(devices=devices, total=len(devices))
 
+    @app.post("/api/admin/devices")
+    def api_admin_device_create(body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
+        device = service.admin_create_device(
+            admin,
+            device_key=body.get("device_key") or body.get("machine_id") or "",
+            device_name=body.get("device_name") or body.get("display_name") or "",
+            mode=body.get("mode") or "machine",
+            radar_url=body.get("radar_url") or "",
+            watchdog_card=body.get("watchdog_card") or "",
+        )
+        return json_ok(msg="创建设备成功", device=device)
+
+    @app.put("/api/admin/devices/{device_id}")
+    def api_admin_device_update(device_id: int, body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
+        device = service.admin_update_device(
+            admin,
+            device_id,
+            device_key=body.get("device_key") if "device_key" in body else body.get("machine_id") if "machine_id" in body else None,
+            device_name=body.get("device_name") if "device_name" in body else body.get("display_name") if "display_name" in body else None,
+            mode=body.get("mode") if "mode" in body else None,
+            radar_url=body.get("radar_url") if "radar_url" in body else None,
+            watchdog_card=body.get("watchdog_card") if "watchdog_card" in body else None,
+            enabled=truthy(body.get("enabled")) if "enabled" in body else None,
+        )
+        return json_ok(msg="保存成功", device=device)
+
+    @app.put("/api/admin/devices/{device_id}/mode")
+    def api_admin_device_mode(device_id: int, body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
+        return json_ok(msg="保存成功", device=service.admin_set_device_mode(admin, device_id, body.get("mode") or "machine"))
+
+    @app.put("/api/admin/devices/{device_id}/toggle")
+    def api_admin_device_toggle(device_id: int, body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
+        return json_ok(msg="保存成功", device=service.admin_set_device_enabled(admin, device_id, truthy(body.get("enabled"))))
+
+    @app.delete("/api/admin/devices/{device_id}")
+    def api_admin_device_delete(device_id: int, admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
+        return json_ok(msg="删除成功", **service.admin_delete_device(admin, device_id))
+
     @app.get("/api/admin/audit-logs")
     def api_admin_audit_logs(limit: int = 200, _admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
         logs = service.admin_audit_logs(limit=limit)
@@ -1651,8 +1694,11 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
     </div>
 
     <div id="tab-devices" class="tab-panel">
-      <div class="section-header"><span class="section-title">设备直控 / 管理员手动下单</span><button class="btn-sm btn-primary" onclick="loadDevicesAdmin()">刷新设备</button></div>
-      <div class="hint" style="margin-bottom:10px">直控只走中央 Bridge 的 control session + command queue，不绕过 fencing token；空闲设备可手动下单，运行中设备可停止/换队/下发维护指令。</div>
+      <div class="section-header">
+        <span class="section-title">设备直控 / 管理员手动下单</span>
+        <div><button class="btn-sm btn-primary" onclick="openAddDeviceModal()">+ 添加设备</button><button class="btn-sm btn-gray" onclick="loadDevicesAdmin()">刷新设备</button></div>
+      </div>
+      <div class="hint" style="margin-bottom:10px">设备新增、机器模式切换、设备码绑定都通过中央 Bridge API Key 执行；直控仍走 control session + fencing token + command queue。</div>
       <div id="devicesTable"></div>
     </div>
 
@@ -2041,6 +2087,44 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
     </div>
   </div>
 
+  <div id="addDeviceModal" class="modal-mask">
+    <div class="modal">
+      <div class="modal-head" id="deviceModalTitle">添加设备</div>
+      <div class="modal-body">
+        <input type="hidden" id="editDeviceId" value="" />
+        <div class="field">
+          <label>设备名称</label>
+          <input type="text" id="deviceName" placeholder="例如：1号机器" />
+        </div>
+        <div class="field" id="fieldDeviceKey">
+          <label>机器ID / 设备码</label>
+          <input type="text" id="deviceKey" placeholder="粘贴客户端显示的机器ID" style="font-family:monospace;" />
+          <div class="hint" id="cardKeyHint">从客户端界面复制机器ID粘贴到此处；保存会通过 Bridge API Key 写入中央。</div>
+        </div>
+        <div class="field">
+          <label>运行模式</label>
+          <select id="deviceMode">
+            <option value="machine">机密</option>
+            <option value="hybrid">混合</option>
+            <option value="absolute">绝密</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>备注网址</label>
+          <input type="text" id="deviceRadarUrl" placeholder="例如：https://xxx.com/radar" />
+        </div>
+        <div class="field">
+          <label>备用电脑的名刀卡号</label>
+          <input type="text" id="deviceWatchdogCard" placeholder="留空表示不绑定" style="font-family:monospace;" />
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn-sm btn-gray" onclick="closeAddDeviceModal()">取消</button>
+        <button class="btn-sm btn-primary" onclick="submitDevice()" id="deviceSubmitBtn">提交</button>
+      </div>
+    </div>
+  </div>
+
   <div id="manualOrderModal" class="modal-mask">
     <div class="modal">
       <div class="modal-head">手动下单</div>
@@ -2381,23 +2465,42 @@ async function loadDevicesAdmin() {
   const d = await api('/api/admin/devices');
   renderDevicesAdmin(d.devices || []);
 }
+function deviceModeBadge(mode) {
+  mode = String(mode || 'machine');
+  if (mode === 'absolute') return '<span class="badge badge-absolute">绝密</span>';
+  if (mode === 'hybrid') return '<span class="badge badge-purple">混合</span>';
+  return '<span class="badge badge-machine">机密</span>';
+}
 function renderDevicesAdmin(rows) {
   if (!rows.length) { $('devicesTable').innerHTML = '<div class="empty-state">暂无设备；请先在 /setup 配置 Bridge API Key，并确认中央 Bridge 已有在线 Agent。</div>'; return; }
   $('devicesTable').innerHTML = `<table class="data-table"><thead><tr>
-    <th>设备</th><th>在线</th><th>控制状态</th><th>Agent/UI</th><th>当前订单</th><th>操作</th>
+    <th>设备</th><th>模式/启用</th><th>在线</th><th>控制状态</th><th>Agent/UI</th><th>当前订单</th><th>操作</th>
   </tr></thead><tbody>` + rows.map(d => {
     const o = d.active_order;
+    const devName = d.device_name || (d.id + '号机');
+    const devKey = d.device_key || d.machine_id || '';
+    const encName = encodeURIComponent(devName);
+    const encKey = encodeURIComponent(devKey);
+    const encRadar = encodeURIComponent(d.radar_url || '');
+    const encWatchdog = encodeURIComponent(d.watchdog_card || '');
+    const mode = d.mode || d.device_mode || 'machine';
+    const nextMode = mode === 'machine' ? 'hybrid' : (mode === 'hybrid' ? 'absolute' : 'machine');
     return `<tr>
-      <td><b>${esc(d.device_name || (d.id + '号机'))}</b><br><span class="hint">#${esc(d.id)}</span></td>
+      <td><b>${esc(devName)}</b><br><span class="hint">#${esc(d.id)} · ${esc(devKey || '未绑定机器ID')}</span></td>
+      <td>${deviceModeBadge(mode)}<br>${d.enabled === false ? '<span class="badge badge-offline">禁用</span>' : '<span class="badge badge-online">启用</span>'}</td>
       <td>${onlineBadge(d.online)}</td>
       <td>${statusBadge(d.control_state || '-')}</td>
       <td>${esc(d.agent_state || '-')}<br><span class="hint">${esc(d.ui_state || '')}</span></td>
       <td>${o ? `${statusBadge(o.status)}<br>${esc(o.customer_username || d.active_customer || '-') } / 剩 ${fmtMin(o.remaining_minutes)}` : '-'}</td>
       <td>
-        ${!o ? `<button class="btn-sm btn-green" onclick="openManualOrder(${d.id}, decodeURIComponent('${encodeURIComponent(d.device_name || (d.id + '号机'))}'), '${esc(d.mode || d.device_mode || 'machine')}')">手动下单</button>
+        <button class="btn-sm btn-primary" onclick="editDevice(${d.id}, decodeURIComponent('${encName}'), decodeURIComponent('${encKey}'), '${esc(mode)}', decodeURIComponent('${encRadar}'), decodeURIComponent('${encWatchdog}'))">编辑</button>
+        <button class="btn-sm btn-purple" onclick="switchMode(${d.id}, '${esc(nextMode)}')">切换模式</button>
+        <button class="btn-sm ${d.enabled === false ? 'btn-green' : 'btn-amber'}" onclick="toggleDevice(${d.id}, ${d.enabled === false ? 1 : 0})">${d.enabled === false ? '启用' : '禁用'}</button>
+        ${!o ? `<button class="btn-sm btn-green" onclick="openManualOrder(${d.id}, decodeURIComponent('${encName}'), '${esc(mode)}')">手动下单</button>
                <button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'restart')">异常重启</button>
                <button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'update')">更新脚本</button>
-               <button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'collect_log')">回收日志</button>` : ''}
+               <button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'collect_log')">回收日志</button>
+               <button class="btn-sm btn-danger" onclick="deleteDevice(${d.id})">删除</button>` : ''}
         ${o ? `<button class="btn-sm btn-primary" onclick="openAdminRejoin(${o.id}, decodeURIComponent('${encodeURIComponent(o.team_code || '')}'))">换队</button>
                <button class="btn-sm btn-danger" onclick="sendDeviceCommand(${d.id}, 'stop_current')">停止</button>
                <button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'ready')">准备</button>
@@ -2408,6 +2511,75 @@ function renderDevicesAdmin(rows) {
       </td>
     </tr>`;
   }).join('') + '</tbody></table>';
+}
+function openAddDeviceModal() {
+  $('editDeviceId').value = '';
+  $('deviceName').value = '';
+  $('deviceKey').value = '';
+  $('deviceMode').value = 'machine';
+  $('deviceRadarUrl').value = '';
+  $('deviceWatchdogCard').value = '';
+  $('deviceModalTitle').textContent = '添加设备';
+  $('cardKeyHint').textContent = '从客户端界面复制机器ID粘贴到此处；保存会通过 Bridge API Key 写入中央。';
+  openModal('addDeviceModal');
+}
+function closeAddDeviceModal() { closeModal('addDeviceModal'); }
+function editDevice(id, name, key, mode, radarUrl, watchdogCard) {
+  $('editDeviceId').value = id;
+  $('deviceName').value = name || '';
+  $('deviceKey').value = key || '';
+  $('deviceMode').value = mode || 'machine';
+  $('deviceRadarUrl').value = radarUrl || '';
+  $('deviceWatchdogCard').value = watchdogCard || '';
+  $('deviceModalTitle').textContent = '编辑设备';
+  $('cardKeyHint').textContent = '修改机器ID将更换绑定的客户端；保存会通过 Bridge API Key 写入中央。';
+  openModal('addDeviceModal');
+}
+async function submitDevice() {
+  const id = $('editDeviceId').value;
+  const body = {
+    device_name: $('deviceName').value.trim(),
+    device_key: $('deviceKey').value.trim(),
+    mode: $('deviceMode').value,
+    radar_url: $('deviceRadarUrl').value.trim(),
+    watchdog_card: $('deviceWatchdogCard').value.trim(),
+  };
+  if (!body.device_name) { toast('请填写设备名称'); return; }
+  if (!body.device_key) { toast('请填写机器ID / 设备码'); return; }
+  const btn = $('deviceSubmitBtn');
+  btn.disabled = true; btn.textContent = '提交中...';
+  try {
+    const url = id ? `/api/admin/devices/${id}` : '/api/admin/devices';
+    const method = id ? 'PUT' : 'POST';
+    const data = await api(url, {method, body:JSON.stringify(body)});
+    toast(data.msg || '操作成功');
+    closeAddDeviceModal();
+    await loadDevicesAdmin();
+  } catch(e) { toast(e.message); }
+  finally { btn.disabled = false; btn.textContent = '提交'; }
+}
+async function switchMode(id, mode) {
+  try {
+    const d = await api(`/api/admin/devices/${id}/mode`, {method:'PUT', body:JSON.stringify({mode})});
+    toast(d.msg || '模式已切换');
+    await loadDevicesAdmin();
+  } catch(e) { toast(e.message); }
+}
+async function toggleDevice(id, enabled) {
+  try {
+    const d = await api(`/api/admin/devices/${id}/toggle`, {method:'PUT', body:JSON.stringify({enabled: !!enabled})});
+    toast(d.msg || '保存成功');
+    await loadDevicesAdmin();
+  } catch(e) { toast(e.message); }
+}
+async function deleteDevice(id) {
+  const ok = await appConfirm('删除设备', '确定删除该设备？有活动 control session 时后端会拒绝。', 'btn-danger');
+  if (!ok) return;
+  try {
+    await api(`/api/admin/devices/${id}`, {method:'DELETE'});
+    toast('删除成功');
+    await loadDevicesAdmin();
+  } catch(e) { toast(e.message); }
 }
 let _manualOrderMode = 'machine';
 let _adminMaxLoadoutCost = 650000;

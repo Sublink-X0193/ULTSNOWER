@@ -216,3 +216,44 @@ python -m pytest -q
 ```
 
 结果：26 passed。
+
+## 2026-06-01 设备码/机器模式 API Key 能力审计
+
+### 追加变更
+
+- 商户后台补回旧版“添加设备”弹窗：
+  - 设备名称
+  - 机器ID / 设备码
+  - 运行模式：机密 / 混合 / 绝密
+  - 备注网址
+  - 备用电脑名刀卡号
+- 设备列表补充显示机器ID、模式、启用状态，并提供：
+  - 编辑
+  - 切换模式
+  - 启用/禁用
+  - 删除
+- 商户端新增 owner-only 设备管理 API，并通过 `BridgeClient` 转发到中央 Bridge。
+- 中央 Bridge HMAC API Key 增加设备管理路由与数据库字段：`mode/enabled/radar_url/watchdog_card`。
+
+### 白盒检查
+
+- [x] 商户端设备写接口均要求 `owner`。
+- [x] 设备新增/编辑/模式切换/启停/删除写入审计日志。
+- [x] 商户端不直接改本地设备状态，统一通过中央 Bridge API Key 修改。
+- [x] 中央 Bridge 写接口要求 `machines.control` scope。
+- [x] 中央 Bridge `capacity` 和 session claim 会排除 disabled 设备。
+- [x] 设备码重复、跨租户占用、活动 control session 删除等由中央 Bridge 拒绝。
+
+### 验证
+
+```text
+# 商户服务器
+python -m compileall -q src tests
+python -m pytest -q
+# 27 passed
+
+# 中央 Bridge
+python -m compileall -q src tests
+python -m pytest -q
+# 8 passed
+```

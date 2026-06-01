@@ -297,6 +297,47 @@ python -m pytest -q
 
 结果：26 passed。
 
+## 10. 2026-06-01 设备码与机器模式 API Key 管理补齐
+
+- 商户后台“设备直控”页补回旧版设备管理入口：
+  - `+ 添加设备`
+  - 编辑设备名称
+  - 填写/修改机器ID/设备码
+  - 设置运行模式：机密 / 混合 / 绝密
+  - 备注网址
+  - 备用电脑名刀卡号
+  - 模式快速切换
+  - 启用/禁用
+  - 删除空闲设备
+- 商户端新增 API：
+  - `POST /api/admin/devices`
+  - `PUT /api/admin/devices/{id}`
+  - `PUT /api/admin/devices/{id}/mode`
+  - `PUT /api/admin/devices/{id}/toggle`
+  - `DELETE /api/admin/devices/{id}`
+- 以上写操作全部要求 `owner`，并写入审计日志。
+- `BridgeClient` 已补齐通过中央 Bridge API Key 调用的设备管理方法。
+- 中央 Bridge 同步补充 HMAC API Key 设备管理能力：
+  - `POST /api/merchant/v1/devices`
+  - `PUT /api/merchant/v1/devices/{id}`
+  - `PUT /api/merchant/v1/devices/{id}/mode`
+  - `PUT /api/merchant/v1/devices/{id}/toggle`
+  - `DELETE /api/merchant/v1/devices/{id}`
+
+最新验证：
+
+```text
+# 商户服务器
+python -m compileall -q src tests
+python -m pytest -q
+# 结果：27 passed
+
+# 中央 Bridge
+python -m compileall -q src tests
+python -m pytest -q
+# 结果：8 passed
+```
+
 ## 8. 2026-06-01 旧版直控/手动下单兼容补强
 
 ### 8.1 手动下单弹窗向旧版靠齐

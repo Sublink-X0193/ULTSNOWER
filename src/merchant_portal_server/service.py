@@ -989,7 +989,14 @@ class MerchantService:
                 **d,
                 "id": did,
                 "device_id": did,
+                "device_key": d.get("machine_id") or d.get("device_key") or d.get("machine") or str(did),
+                "machine_id": d.get("machine_id") or d.get("device_key") or "",
                 "device_name": d.get("display_name") or d.get("device_name") or f"{did}号机",
+                "mode": d.get("mode") or d.get("device_mode") or "machine",
+                "device_mode": d.get("mode") or d.get("device_mode") or "machine",
+                "enabled": bool(d.get("enabled", True)),
+                "radar_url": d.get("radar_url") or "",
+                "watchdog_card": d.get("watchdog_card") or "",
                 "online": bool(d.get("online", True)),
                 "control_state": (active.get("status") if active else None) or d.get("control_state") or d.get("state") or "idle",
                 "agent_state": d.get("agent_state") or d.get("ui_state") or "",
@@ -1014,6 +1021,99 @@ class MerchantService:
             })
         out.sort(key=lambda x: int(x.get("id") or 0))
         return out
+
+    @staticmethod
+    def _normalize_device_mode(mode: Any) -> str:
+        mode_s = str(mode or "machine").strip().lower()
+        return mode_s if mode_s in {"machine", "hybrid", "absolute"} else "machine"
+
+    @staticmethod
+    def _validate_device_key(value: Any) -> str:
+        key = str(value or "").strip()
+        if not key or len(key) > 128:
+            raise MerchantError("bad_device_key", "机器ID不合法")
+        if any(ch in key for ch in "\r\n\t<>\"'`"):
+            raise MerchantError("bad_device_key", "机器ID含非法字符")
+        return key
+
+    @staticmethod
+    def _validate_device_name(value: Any) -> str:
+        name = str(value or "").strip()
+        if not name or len(name) > 128:
+            raise MerchantError("bad_device_name", "设备名称不合法")
+        return name
+
+    def admin_create_device(self, admin: dict[str, Any] | None, *, device_key: str, device_name: str, mode: str = "machine", radar_url: str = "", watchdog_card: str = "") -> dict[str, Any]:
+        if not hasattr(self.bridge, "create_device"):
+            raise MerchantError("bridge_unsupported", "中央 Bridge 当前不支持 API Key 设备新增，请先更新中央 Bridge", 501)
+        device_key = self._validate_device_key(device_key)
+        device_name = self._validate_device_name(device_name)
+        mode = self._normalize_device_mode(mode)
+        try:
+            dev = self.bridge.create_device(machine_id=device_key, display_name=device_name, mode=mode, radar_url=str(radar_url or "").strip(), watchdog_card=str(watchdog_card or "").strip(), idem=f"device-create:{device_key}:{iso()}")
+        except BridgeClientError as e:
+            raise MerchantError(e.code, e.message, e.status_code)
+        with self.db.connect() as con:
+            self._log_admin_action_locked(con, admin, "device_create", "device", dev.get("id") or device_key, {"device_key": device_key, "device_name": device_name, "mode": mode})
+        return dict(dev)
+
+    def admin_update_device(self, admin: dict[str, Any] | None, device_id: int, *, device_key: str | None = None, device_name: str | None = None, mode: str | None = None, radar_url: str | None = None, watchdog_card: str | None = None, enabled: bool | None = None) -> dict[str, Any]:
+        if not hasattr(self.bridge, "update_device"):
+            raise MerchantError("bridge_unsupported", "中央 Bridge 当前不支持 API Key 设备编辑，请先更新中央 Bridge", 501)
+        kwargs: dict[str, Any] = {}
+        if device_key is not None:
+            kwargs["machine_id"] = self._validate_device_key(device_key)
+        if device_name is not None:
+            kwargs["display_name"] = self._validate_device_name(device_name)
+        if mode is not None:
+            kwargs["mode"] = self._normalize_device_mode(mode)
+        if radar_url is not None:
+            kwargs["radar_url"] = str(radar_url or "").strip()
+        if watchdog_card is not None:
+            kwargs["watchdog_card"] = str(watchdog_card or "").strip()
+        if enabled is not None:
+            kwargs["enabled"] = bool(enabled)
+        try:
+            dev = self.bridge.update_device(int(device_id), **kwargs, idem=f"device-update:{int(device_id)}:{iso()}")
+        except BridgeClientError as e:
+            raise MerchantError(e.code, e.message, e.status_code)
+        with self.db.connect() as con:
+            self._log_admin_action_locked(con, admin, "device_update", "device", device_id, kwargs)
+        return dict(dev)
+
+    def admin_set_device_mode(self, admin: dict[str, Any] | None, device_id: int, mode: str) -> dict[str, Any]:
+        if not hasattr(self.bridge, "set_device_mode"):
+            raise MerchantError("bridge_unsupported", "中央 Bridge 当前不支持 API Key 机器模式切换，请先更新中央 Bridge", 501)
+        mode = self._normalize_device_mode(mode)
+        try:
+            dev = self.bridge.set_device_mode(int(device_id), mode, idem=f"device-mode:{int(device_id)}:{mode}:{iso()}")
+        except BridgeClientError as e:
+            raise MerchantError(e.code, e.message, e.status_code)
+        with self.db.connect() as con:
+            self._log_admin_action_locked(con, admin, "device_mode_update", "device", device_id, {"mode": mode})
+        return dict(dev)
+
+    def admin_set_device_enabled(self, admin: dict[str, Any] | None, device_id: int, enabled: bool) -> dict[str, Any]:
+        if not hasattr(self.bridge, "set_device_enabled"):
+            raise MerchantError("bridge_unsupported", "中央 Bridge 当前不支持 API Key 设备启停，请先更新中央 Bridge", 501)
+        try:
+            dev = self.bridge.set_device_enabled(int(device_id), bool(enabled), idem=f"device-toggle:{int(device_id)}:{int(bool(enabled))}:{iso()}")
+        except BridgeClientError as e:
+            raise MerchantError(e.code, e.message, e.status_code)
+        with self.db.connect() as con:
+            self._log_admin_action_locked(con, admin, "device_toggle", "device", device_id, {"enabled": bool(enabled)})
+        return dict(dev)
+
+    def admin_delete_device(self, admin: dict[str, Any] | None, device_id: int) -> dict[str, Any]:
+        if not hasattr(self.bridge, "delete_device"):
+            raise MerchantError("bridge_unsupported", "中央 Bridge 当前不支持 API Key 设备删除，请先更新中央 Bridge", 501)
+        try:
+            res = self.bridge.delete_device(int(device_id), idem=f"device-delete:{int(device_id)}:{iso()}")
+        except BridgeClientError as e:
+            raise MerchantError(e.code, e.message, e.status_code)
+        with self.db.connect() as con:
+            self._log_admin_action_locked(con, admin, "device_delete", "device", device_id, {})
+        return dict(res)
 
     def _resolve_admin_device_id(self, identifier: Any) -> int:
         raw = str(identifier or "").strip()
