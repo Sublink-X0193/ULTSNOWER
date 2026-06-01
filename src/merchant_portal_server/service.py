@@ -1260,6 +1260,7 @@ class MerchantService:
             res = self.bridge.delete_device(int(device_id), idem=f"device-delete:{int(device_id)}:{iso()}")
         except BridgeClientError as e:
             raise MerchantError(e.code, e.message, e.status_code)
+        res = {k: v for k, v in dict(res).items() if k not in {"ok", "msg"}}
         with self.db.connect() as con:
             self._log_admin_action_locked(con, admin, "device_delete", "device", device_id, {})
         return dict(res)

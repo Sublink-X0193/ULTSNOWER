@@ -108,7 +108,7 @@ class FakeBridge:
                 raise BridgeClientError("not_found", "设备不存在", 404)
             self.devices.pop(int(device_id), None)
             self.idle = [x for x in self.idle if x != int(device_id)]
-            return {"id": int(device_id), "deleted": True}
+            return {"ok": True, "msg": "删除成功", "id": int(device_id), "deleted": True}
 
     def create_control_session(
         self,
@@ -1107,7 +1107,8 @@ def test_admin_devices_reuse_legacy_runtime_fields(app_and_bridge):
             "ui_state": "team",
             "runtime": {
                 "work_status": "已进队",
-                "spectate_boss": "BOSS7788",
+                "boss_id": "BOSS7788",
+                "running_boss_name": "TEAM7777",
                 "harvard": "88.5W",
                 "round_count": 2,
                 "max_rounds": 5,
@@ -1122,6 +1123,9 @@ def test_admin_devices_reuse_legacy_runtime_fields(app_and_bridge):
     row = next(d for d in data if d["id"] == 1)
     assert row["work_status"] == "已进队"
     assert row["spectate_boss"] == "BOSS7788"
+    assert row["boss_id"] == "BOSS7788"
+    assert row["running_boss_name"] == "TEAM7777"
+    assert row["team_code"] == "TEAM7777"
     assert row["harvard"] == "88.5W"
     assert row["round_count"] == 2
 

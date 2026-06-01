@@ -116,7 +116,8 @@ class BridgeClient:
         return data.get("device") or data
 
     def delete_device(self, device_id: int, *, idem: str) -> dict[str, Any]:
-        return self.request("DELETE", f"/api/merchant/v1/devices/{int(device_id)}", idem=idem)
+        data = self.request("DELETE", f"/api/merchant/v1/devices/{int(device_id)}", idem=idem)
+        return {k: v for k, v in data.items() if k not in {"ok", "msg"}}
 
     def create_control_session(
         self,
