@@ -851,11 +851,22 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     @app.post("/api/admin/manual-order")
     def api_admin_manual_order(request: Request, body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
         require_owner_admin(admin)
+        device_id = int(body.get("device_id") or 0)
         mode = str(body.get("selected_mode") or body.get("mode") or "").strip().lower()
+        if not mode and device_id:
+            try:
+                for d in service.admin_list_devices():
+                    if int(d.get("id") or d.get("device_id") or 0) == device_id:
+                        mode = str(d.get("mode") or d.get("device_mode") or d.get("quality") or "").strip().lower()
+                        break
+            except Exception:
+                mode = ""
+        if mode == "hybrid":
+            mode = "machine"
         quality = body.get("quality") or ("secret" if mode in {"absolute", "secret", "绝密"} else "standard")
         order = service.admin_manual_order(
             admin,
-            device_id=int(body.get("device_id") or 0),
+            device_id=device_id,
             requested_minutes=int(body.get("run_minutes") or body.get("requested_minutes") or body.get("minutes") or 0),
             requested_rounds=int(body.get("run_rounds") or body.get("rounds") or body.get("max_rounds") or 0),
             max_coin_loss=int(body.get("max_coin_loss") or 0),
@@ -2032,50 +2043,95 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
 
   <div id="manualOrderModal" class="modal-mask">
     <div class="modal">
-      <div class="modal-head">管理员手动下单</div>
+      <div class="modal-head">手动下单</div>
       <div class="modal-body">
-        <input id="manualDeviceId" type="hidden">
-        <div class="info-box" id="manualDeviceInfo">--</div>
-        <div class="field"><label>组队码</label><input id="manualBossName" placeholder="前3位大写字母+后4位数字（如 ABC1234）"></div>
+        <input type="hidden" id="manualDeviceId" value="" />
+        <div class="field">
+          <div class="info-box" id="manualDeviceInfo" style="padding:10px 12px;background:#eff6ff;border-radius:8px;font-size:13px;color:#1d4ed8;">--</div>
+        </div>
+        <div class="field">
+          <label>组队码</label>
+          <input type="text" id="manualBossName" placeholder="前3位大写字母+后4位数字（如 ABC1234）" />
+        </div>
         <div class="field" id="manualHybridModeSection" style="display:none">
           <label>混合模式选择</label>
-          <div style="display:flex;gap:12px">
-            <label style="display:flex;gap:6px;align-items:center"><input type="radio" name="manualHybridMode" value="machine" checked onchange="updateManualOrderMode()"> 按机密下单</label>
-            <label style="display:flex;gap:6px;align-items:center"><input type="radio" name="manualHybridMode" value="absolute" onchange="updateManualOrderMode()"> 按绝密下单</label>
+          <div style="display:flex;gap:10px;">
+            <label style="display:flex;align-items:center;cursor:pointer;">
+              <input type="radio" name="manualHybridMode" value="machine" checked onchange="updateManualOrderMode()" style="margin-right:5px;" />
+              <span>按机密下单</span>
+            </label>
+            <label style="display:flex;align-items:center;cursor:pointer;">
+              <input type="radio" name="manualHybridMode" value="absolute" onchange="updateManualOrderMode()" style="margin-right:5px;" />
+              <span>按绝密下单</span>
+            </label>
           </div>
         </div>
         <div class="field-row">
-          <div class="field"><label>小时</label><input id="manualHours" type="number" min="0" max="24" value="1"></div>
-          <div class="field"><label>分钟</label><input id="manualMinutes" type="number" min="0" max="59" value="0"></div>
+          <div class="field">
+            <label>时长（小时）</label>
+            <input type="number" id="manualHours" min="0" max="9999" value="1" onchange="autoCalculateRounds()" />
+          </div>
+          <div class="field">
+            <label>时长（分钟）</label>
+            <input type="number" id="manualMinutes" min="0" max="59" value="0" onchange="autoCalculateRounds()" />
+          </div>
         </div>
-        <div class="field-row">
-          <div class="field"><label>限制局数（0表示不限制）</label><input id="manualMaxRounds" type="number" min="0" value="0"></div>
-          <div class="field"><label>限制亏币（单位：万，0表示不限制）</label><input id="manualMaxCoinLoss" type="number" min="0" value="0"></div>
+        <div class="field">
+          <label>限制局数（0表示不限制）</label>
+          <input type="number" id="manualMaxRounds" min="0" value="0" oninput="this.value=this.value.replace(/[^0-9]/g,'')" />
         </div>
-        <div id="manualLoadoutSection" style="display:none">
+        <div class="field">
+          <label>限制亏币（单位：万，0表示不限制）</label>
+          <input type="number" id="manualMaxCoinLoss" min="0" value="0" oninput="this.value=this.value.replace(/[^0-9]/g,'')" />
+        </div>
+        <div id="loadoutSection" style="display:none;">
           <div class="field">
             <label>配装类型</label>
-            <div style="display:flex;gap:12px">
-              <label style="display:flex;gap:6px;align-items:center"><input type="radio" name="manualLoadoutType" value="default" checked onchange="toggleManualLoadoutCustom()"> 大红包默认配装</label>
-              <label id="manualCustomLoadoutOption" style="display:flex;gap:6px;align-items:center"><input type="radio" name="manualLoadoutType" value="custom" onchange="toggleManualLoadoutCustom()"> 自定义配装</label>
+            <div style="display:flex;gap:10px;">
+              <label style="display:flex;align-items:center;cursor:pointer;">
+                <input type="radio" name="loadoutType" value="default" checked onchange="toggleLoadoutCustom()" style="margin-right:5px;" />
+                <span>大红包默认配装</span>
+              </label>
+              <label style="display:flex;align-items:center;cursor:pointer;" id="adminCustomLoadoutOption">
+                <input type="radio" name="loadoutType" value="custom" onchange="toggleLoadoutCustom()" style="margin-right:5px;" />
+                <span>自定义配装</span>
+              </label>
             </div>
           </div>
-          <div id="manualCustomLoadoutFields" style="display:none">
-            <div class="field-row">
-              <div class="field"><label>头部装备</label><select id="manualLoadoutHelmet" onchange="calculateManualLoadoutCost()"><option value="">不携带</option></select></div>
-              <div class="field"><label>护甲装备</label><select id="manualLoadoutArmor" onchange="calculateManualLoadoutCost()"><option value="">不携带</option></select></div>
+          <div id="customLoadoutFields" style="display:none;">
+            <div class="field">
+              <label>头部装备</label>
+              <select id="loadoutHelmet" onchange="calculateLoadoutCost()"><option value="">不携带</option></select>
             </div>
-            <div class="field-row">
-              <div class="field"><label>胸挂装备</label><select id="manualLoadoutRig" onchange="calculateManualLoadoutCost()"><option value="">不携带</option></select></div>
-              <div class="field"><label>手枪装备</label><select id="manualLoadoutPistol" onchange="calculateManualLoadoutCost()"><option value="">不携带</option></select></div>
+            <div class="field">
+              <label>护甲装备</label>
+              <select id="loadoutArmor" onchange="calculateLoadoutCost()"><option value="">不携带</option></select>
             </div>
-            <div class="field"><label>背包装备</label><select id="manualLoadoutBackpack" onchange="calculateManualLoadoutCost()"><option value="">不携带</option></select></div>
-            <div class="info-box" id="manualLoadoutCostBox">配装总价：<span id="manualLoadoutCostValue">0W</span> / <span id="manualMaxCost">65</span>W</div>
+            <div class="field">
+              <label>胸挂装备</label>
+              <select id="loadoutRig" onchange="calculateLoadoutCost()"><option value="">不携带</option></select>
+            </div>
+            <div class="field">
+              <label>手枪装备</label>
+              <select id="loadoutPistol" onchange="calculateLoadoutCost()"><option value="">不携带</option></select>
+            </div>
+            <div class="field">
+              <label>背包装备</label>
+              <select id="loadoutBackpack" onchange="calculateLoadoutCost()"><option value="">不携带</option></select>
+            </div>
+            <div class="field">
+              <div id="loadoutCostDisplay" style="padding:10px;background:#fef3c7;border-radius:6px;font-size:14px;font-weight:bold;color:#92400e;">
+                配装总价：<span id="loadoutCostValue">0</span>元 / <span id="adminMaxCost">65</span>W
+              </div>
+            </div>
           </div>
         </div>
-        <div class="hint">上机用户将显示为「组队码-手动」。手动下单不扣客户余额，收到 ready_for_customer_timer 后一样开始计时。</div>
+        <div class="hint" style="color:#d97706;">上机用户将显示为「组队码-手动」</div>
       </div>
-      <div class="modal-foot"><button class="btn-sm btn-gray" onclick="closeModal('manualOrderModal')">取消</button><button class="btn-sm btn-green" onclick="submitManualOrder()">确认下单</button></div>
+      <div class="modal-foot">
+        <button class="btn-sm btn-gray" onclick="closeManualOrderModal()">取消</button>
+        <button class="btn-sm btn-green" onclick="submitManualOrder()" id="manualOrderBtn">确认下单</button>
+      </div>
     </div>
   </div>
 
@@ -2354,101 +2410,178 @@ function renderDevicesAdmin(rows) {
   }).join('') + '</tbody></table>';
 }
 let _manualOrderMode = 'machine';
-let _manualMaxLoadoutCost = 65;
-let _manualAllowCustomLoadout = true;
+let _adminMaxLoadoutCost = 650000;
+let _adminAllowCustomLoadout = true;
 function getManualEffectiveMode() {
-  return _manualOrderMode === 'hybrid' ? (document.querySelector('input[name="manualHybridMode"]:checked')?.value || 'machine') : _manualOrderMode;
+  if (_manualOrderMode === 'hybrid') {
+    return document.querySelector('input[name="manualHybridMode"]:checked')?.value || 'machine';
+  }
+  return _manualOrderMode;
 }
 function validateBossName(name) { return /^[A-Z]{3}\\d{4}$/.test(String(name || '').trim()); }
+function appAlert(msg) { toast(msg); }
+function formatMinutes(m) { return fmtMin(m); }
 function updateManualOrderMode() {
-  const effective = getManualEffectiveMode();
-  $('manualLoadoutSection').style.display = effective === 'absolute' ? '' : 'none';
-  if (effective === 'absolute') {
-    loadManualEquipmentConfig().then(() => calculateManualLoadoutCost());
-    const roundsEl = $('manualMaxRounds');
-    if (!Number(roundsEl.value || 0)) {
-      const minutes = Number($('manualHours').value || 0) * 60 + Number($('manualMinutes').value || 0);
-      roundsEl.value = minutes ? Math.max(_absoluteRoundsPerHour, Math.floor(minutes / 60 * _absoluteRoundsPerHour)) : 0;
-    }
+  const effectiveMode = getManualEffectiveMode();
+  const loadoutSection = document.getElementById('loadoutSection');
+  if (effectiveMode === 'absolute') {
+    loadoutSection.style.display = 'block';
+    document.querySelector('input[name="loadoutType"][value="default"]').checked = true;
+    document.getElementById('customLoadoutFields').style.display = 'none';
+    loadAdminEquipmentConfig().then(() => {
+      document.querySelector('input[name="loadoutType"][value="default"]').checked = true;
+      document.getElementById('customLoadoutFields').style.display = 'none';
+      resetLoadoutSelections();
+    });
+  } else {
+    loadoutSection.style.display = 'none';
   }
+  autoCalculateRounds();
 }
-async function loadManualEquipmentConfig() {
+function openManualOrderModal(deviceId, deviceName, mode) {
+  _manualOrderMode = mode || 'machine';
+  document.getElementById('manualDeviceId').value = deviceId;
+  const modeLabel = _manualOrderMode === 'machine' ? '机密' : (_manualOrderMode === 'hybrid' ? '混合' : '绝密');
+  document.getElementById('manualDeviceInfo').innerHTML = `设备: <b>${esc(deviceName || deviceId)}</b> · 模式: <b>${modeLabel}</b>`;
+  document.getElementById('manualBossName').value = '';
+  document.getElementById('manualHours').value = 1;
+  document.getElementById('manualMinutes').value = 0;
+  document.getElementById('manualMaxRounds').value = 0;
+  document.getElementById('manualMaxCoinLoss').value = 0;
+  const hybridModeSection = document.getElementById('manualHybridModeSection');
+  if (_manualOrderMode === 'hybrid') {
+    hybridModeSection.style.display = 'block';
+    document.querySelector('input[name="manualHybridMode"][value="machine"]').checked = true;
+  } else {
+    hybridModeSection.style.display = 'none';
+  }
+  updateManualOrderMode();
+  document.getElementById('manualOrderModal').classList.add('show');
+}
+function openManualOrder(deviceId, name, mode='machine') { openManualOrderModal(deviceId, name, mode); }
+async function loadAdminEquipmentConfig() {
   try {
     const d = await api('/api/admin/equipment-config');
-    _manualMaxLoadoutCost = Number(d.max_loadout_cost || 65);
-    _manualAllowCustomLoadout = d.allow_custom_loadout !== false;
-    $('manualMaxCost').textContent = _manualMaxLoadoutCost;
-    $('manualCustomLoadoutOption').style.display = _manualAllowCustomLoadout ? 'flex' : 'none';
-    const map = {helmet:'manualLoadoutHelmet', armor:'manualLoadoutArmor', rig:'manualLoadoutRig', pistol:'manualLoadoutPistol', backpack:'manualLoadoutBackpack'};
+    _adminMaxLoadoutCost = (Number(d.max_loadout_cost || 65)) * 10000;
+    _adminAllowCustomLoadout = d.allow_custom_loadout !== false;
+    const el = document.getElementById('adminMaxCost');
+    if (el) el.textContent = Number(d.max_loadout_cost || 65);
+    const customOptionLabel = document.getElementById('adminCustomLoadoutOption');
+    if (customOptionLabel) customOptionLabel.style.display = _adminAllowCustomLoadout ? 'flex' : 'none';
+    const map = {helmet:'loadoutHelmet', armor:'loadoutArmor', rig:'loadoutRig', pistol:'loadoutPistol', backpack:'loadoutBackpack'};
     Object.values(map).forEach(id => { $(id).innerHTML = '<option value="">不携带</option>'; });
     (d.equipment || []).filter(e => Number(e.enabled) === 1).forEach(e => {
       const sel = $(map[e.equipment_type]); if (!sel) return;
+      const priceReal = Number(e.price || 0) * 10000;
       const opt = document.createElement('option');
-      opt.value = `${e.equipment_name}:${Number(e.price || 0)}`;
+      opt.value = `${e.equipment_name}:${priceReal}`;
       opt.textContent = `${e.equipment_name} (${Number(e.price || 0)}W)`;
       sel.appendChild(opt);
     });
   } catch(_e) {}
 }
-function toggleManualLoadoutCustom() {
-  const isCustom = _manualAllowCustomLoadout && document.querySelector('input[name="manualLoadoutType"]:checked')?.value === 'custom';
-  $('manualCustomLoadoutFields').style.display = isCustom ? '' : 'none';
-  calculateManualLoadoutCost();
+function toggleLoadoutCustom() {
+  const selectedType = document.querySelector('input[name="loadoutType"]:checked')?.value || 'default';
+  const isCustom = _adminAllowCustomLoadout && selectedType === 'custom';
+  document.getElementById('customLoadoutFields').style.display = isCustom ? 'block' : 'none';
+  if (isCustom) loadAdminEquipmentConfig().then(() => calculateLoadoutCost());
 }
-function calculateManualLoadoutCost() {
-  const ids = ['manualLoadoutHelmet','manualLoadoutArmor','manualLoadoutRig','manualLoadoutPistol','manualLoadoutBackpack'];
+function toggleManualLoadoutCustom() { toggleLoadoutCustom(); }
+function resetLoadoutSelections() {
+  ['loadoutHelmet','loadoutArmor','loadoutRig','loadoutPistol','loadoutBackpack'].forEach(id => { if ($(id)) $(id).value = ''; });
+  calculateLoadoutCost();
+}
+function calculateLoadoutCost() {
   let total = 0;
-  ids.forEach(id => { const v = $(id)?.value || ''; if (v.includes(':')) total += Number(v.split(':')[1] || 0); });
-  $('manualLoadoutCostValue').textContent = total.toFixed(1) + 'W';
-  $('manualLoadoutCostBox').style.background = total > _manualMaxLoadoutCost ? '#fee2e2' : '#eff6ff';
-  $('manualLoadoutCostBox').style.color = total > _manualMaxLoadoutCost ? '#991b1b' : '#1d4ed8';
+  ['loadoutHelmet','loadoutArmor','loadoutRig','loadoutPistol','loadoutBackpack'].forEach(id => {
+    const v = $(id)?.value || '';
+    if (v.includes(':')) total += Number(v.split(':')[1] || 0);
+  });
+  const costDisplay = document.getElementById('loadoutCostValue');
+  if (costDisplay) costDisplay.textContent = (total / 10000).toFixed(1) + 'W';
+  const costBox = document.getElementById('loadoutCostDisplay');
+  if (costBox) {
+    costBox.style.background = total > _adminMaxLoadoutCost ? '#fee2e2' : '#fef3c7';
+    costBox.style.color = total > _adminMaxLoadoutCost ? '#991b1b' : '#92400e';
+  }
   return total;
 }
-function openManualOrder(deviceId, name, mode='machine') {
-  _manualOrderMode = mode || 'machine';
-  $('manualDeviceId').value = deviceId;
-  const label = _manualOrderMode === 'absolute' ? '绝密' : (_manualOrderMode === 'hybrid' ? '混合' : '机密');
-  $('manualDeviceInfo').innerHTML = `设备：<b>${esc(name || deviceId)}</b> · 模式：<b>${label}</b>`;
-  $('manualBossName').value = '';
-  $('manualHours').value = '1';
-  $('manualMinutes').value = '0';
-  $('manualMaxRounds').value = '0';
-  $('manualMaxCoinLoss').value = '0';
-  $('manualHybridModeSection').style.display = _manualOrderMode === 'hybrid' ? '' : 'none';
-  document.querySelector('input[name="manualHybridMode"][value="machine"]').checked = true;
-  document.querySelector('input[name="manualLoadoutType"][value="default"]').checked = true;
-  $('manualCustomLoadoutFields').style.display = 'none';
-  updateManualOrderMode();
-  openModal('manualOrderModal');
+function calculateManualLoadoutCost() { return calculateLoadoutCost() / 10000; }
+function autoCalculateRounds() {
+  if (getManualEffectiveMode() !== 'absolute') return;
+  const maxRoundsEl = document.getElementById('manualMaxRounds');
+  if ((parseInt(maxRoundsEl.value) || 0) !== 0) return;
+  const hours = parseInt(document.getElementById('manualHours').value) || 0;
+  const minutes = parseInt(document.getElementById('manualMinutes').value) || 0;
+  const totalMinutes = hours * 60 + minutes;
+  if (totalMinutes > 0) maxRoundsEl.value = Math.max(_absoluteRoundsPerHour, Math.floor((totalMinutes / 60) * _absoluteRoundsPerHour));
+}
+function closeManualOrderModal() {
+  document.getElementById('manualOrderModal').classList.remove('show');
 }
 async function submitManualOrder() {
-  const minutes = Number($('manualHours').value || 0) * 60 + Number($('manualMinutes').value || 0);
-  const bossName = $('manualBossName').value.trim().toUpperCase();
-  const mode = getManualEffectiveMode();
-  if (!validateBossName(bossName)) { toast('组队码格式错误：前3位大写字母+后4位数字'); return; }
-  if (minutes <= 0) { toast('请填写有效运行时长'); return; }
-  const loadoutType = document.querySelector('input[name="manualLoadoutType"]:checked')?.value || 'default';
-  const loadoutTotalCost = calculateManualLoadoutCost();
-  if (mode === 'absolute' && loadoutType === 'custom' && loadoutTotalCost > _manualMaxLoadoutCost) { toast(`配装总价不能超过 ${_manualMaxLoadoutCost}W`); return; }
-  const getLoadoutName = id => { const v=$(id)?.value || ''; return v.includes(':') ? v.split(':')[0] : ''; };
+  const deviceId = document.getElementById('manualDeviceId').value;
+  const bossName = document.getElementById('manualBossName').value.trim().toUpperCase();
+  const hours = parseInt(document.getElementById('manualHours').value) || 0;
+  const minutes = parseInt(document.getElementById('manualMinutes').value) || 0;
+  const runMinutes = hours * 60 + minutes;
+  const maxRoundsInput = document.getElementById('manualMaxRounds').value.trim();
+  const maxCoinLossInput = document.getElementById('manualMaxCoinLoss').value.trim();
+
+  if (!bossName) { appAlert('请输入组队码'); return; }
+  if (!validateBossName(bossName)) { appAlert('组队码格式错误：前3位为大写字母，后4位为数字（如 ABC1234）'); return; }
+  if (runMinutes <= 0) { appAlert('请填写有效的运行时长'); return; }
+  if (maxRoundsInput && !/^\\d+$/.test(maxRoundsInput)) { appAlert('限制局数必须为纯数字'); return; }
+  if (maxCoinLossInput && !/^\\d+$/.test(maxCoinLossInput)) { appAlert('限制亏币必须为纯数字'); return; }
+
+  const maxRounds = parseInt(maxRoundsInput) || 0;
+  const maxCoinLoss = parseInt(maxCoinLossInput) || 0;
+  const effectiveMode = getManualEffectiveMode();
+  let loadoutType = 'default';
+  let loadoutHelmet = '', loadoutArmor = '', loadoutRig = '', loadoutPistol = '', loadoutBackpack = '';
+  let loadoutTotalCost = 0;
+  if (effectiveMode === 'absolute') {
+    loadoutType = document.querySelector('input[name="loadoutType"]:checked')?.value || 'default';
+    if (!_adminAllowCustomLoadout) loadoutType = 'default';
+    if (loadoutType === 'custom') {
+      const pick = id => document.getElementById(id).value || '';
+      const helmet = pick('loadoutHelmet'), armor = pick('loadoutArmor'), rig = pick('loadoutRig'), pistol = pick('loadoutPistol'), backpack = pick('loadoutBackpack');
+      if (helmet) { loadoutHelmet = helmet.split(':')[0]; loadoutTotalCost += parseInt(helmet.split(':')[1]); }
+      if (armor) { loadoutArmor = armor.split(':')[0]; loadoutTotalCost += parseInt(armor.split(':')[1]); }
+      if (rig) { loadoutRig = rig.split(':')[0]; loadoutTotalCost += parseInt(rig.split(':')[1]); }
+      if (pistol) { loadoutPistol = pistol.split(':')[0]; loadoutTotalCost += parseInt(pistol.split(':')[1]); }
+      if (backpack) { loadoutBackpack = backpack.split(':')[0]; loadoutTotalCost += parseInt(backpack.split(':')[1]); }
+      if (loadoutTotalCost > _adminMaxLoadoutCost) { appAlert(`配装总价不能超过${_adminMaxLoadoutCost / 10000}W`); return; }
+    }
+  }
+
+  const btn = document.getElementById('manualOrderBtn');
+  btn.disabled = true;
+  btn.textContent = '提交中...';
   try {
-    await api('/api/admin/manual-order', {method:'POST', body:JSON.stringify({
-      device_id: Number($('manualDeviceId').value || 0),
+    const data = await api('/api/admin/manual-order', {method:'POST', body:JSON.stringify({
+      device_id: parseInt(deviceId),
       boss_name: bossName,
-      run_minutes: minutes,
-      max_rounds: Number($('manualMaxRounds').value || 0),
-      max_coin_loss: Number($('manualMaxCoinLoss').value || 0),
-      selected_mode: mode,
-      loadout_type: mode === 'absolute' ? loadoutType : 'default',
-      loadout_helmet: getLoadoutName('manualLoadoutHelmet'),
-      loadout_armor: getLoadoutName('manualLoadoutArmor'),
-      loadout_rig: getLoadoutName('manualLoadoutRig'),
-      loadout_pistol: getLoadoutName('manualLoadoutPistol'),
-      loadout_backpack: getLoadoutName('manualLoadoutBackpack'),
-      loadout_total_cost: Math.round(loadoutTotalCost * 10000),
+      selected_mode: _manualOrderMode === 'hybrid' ? effectiveMode : undefined,
+      run_minutes: runMinutes,
+      max_rounds: maxRounds,
+      max_coin_loss: maxCoinLoss,
+      loadout_type: loadoutType,
+      loadout_helmet: loadoutHelmet,
+      loadout_armor: loadoutArmor,
+      loadout_rig: loadoutRig,
+      loadout_pistol: loadoutPistol,
+      loadout_backpack: loadoutBackpack,
+      loadout_total_cost: loadoutTotalCost
     })});
-    closeModal('manualOrderModal'); toast('手动下单已创建'); await loadDevicesAdmin(); await loadOrders(); await loadOverview();
-  } catch(e) { toast(e.message); }
+    appAlert(`手动下单成功！运行时长: ${formatMinutes(data.run_minutes)}`);
+    closeManualOrderModal();
+    await loadDevicesAdmin(); await loadOrders(); await loadOverview();
+  } catch(e) { appAlert(e.message || '网络错误'); }
+  finally {
+    btn.disabled = false;
+    btn.textContent = '确认下单';
+  }
 }
 function openAdminRejoin(orderId, oldTeam='') {
   $('rejoinOrderId').value = orderId;

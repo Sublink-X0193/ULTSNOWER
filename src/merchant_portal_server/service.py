@@ -1068,7 +1068,7 @@ class MerchantService:
         loadout = loadout or {"loadout_type": "default", "items": {}, "total_cost": 0}
         if device_id <= 0:
             raise MerchantError("bad_device", "请选择设备")
-        if requested_minutes <= 0 or requested_minutes > 24 * 60:
+        if requested_minutes <= 0 or requested_minutes > (9999 * 60 + 59):
             raise MerchantError("bad_minutes", "手动下单分钟数不合法")
         if not (3 <= len(team_code) <= 32):
             raise MerchantError("bad_team_code", "队伍码长度不合法")

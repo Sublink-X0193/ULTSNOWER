@@ -187,3 +187,32 @@ python -m pytest -q
 ```
 
 结果：24 passed。
+
+## 2026-06-01 管理员手动下单 1:1 旧版控件审计
+
+### 追加变更
+
+- 后台“设备直控 / 管理员手动下单”弹窗按旧版页面恢复：
+  - 标题改回“手动下单”。
+  - 保留旧版控件 ID/函数名：`manualOrderModal`、`manualDeviceInfo`、`manualBossName`、`manualHybridModeSection`、`loadoutSection`、`customLoadoutFields`、`loadoutHelmet/Armor/Rig/Pistol/Backpack`、`manualOrderBtn`、`openManualOrderModal()`、`closeManualOrderModal()`、`autoCalculateRounds()`、`toggleLoadoutCustom()`、`calculateLoadoutCost()`。
+  - 恢复旧版字段文案：时长（小时/分钟）、限制局数、限制亏币、大红包默认配装、自定义配装。
+  - 小时最大值恢复旧版 `9999`。
+- 后端手动下单时长上限同步放宽到旧版控件范围。
+- 兼容旧版 payload：非混合设备前端不传 `selected_mode` 时，后端会按设备模式推断机密/绝密。
+
+### 白盒检查
+
+- [x] 旧版控件 ID 和函数名均出现在商户后台 HTML，旧脚本/习惯不会断。
+- [x] 绝密模式仍会加载装备配置，配装价格按 W 转换为旧版的真实数值单位再提交。
+- [x] 绝密自定义配装超过最大价值会在前端阻止。
+- [x] 混合模式仍能选择按机密/按绝密下单。
+- [x] 旧版非混合 payload 不带 `selected_mode` 时，API 会从设备列表推断模式，避免绝密设备被误判为机密。
+
+### 验证
+
+```text
+python -m compileall -q src tests
+python -m pytest -q
+```
+
+结果：26 passed。

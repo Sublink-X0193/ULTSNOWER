@@ -807,7 +807,7 @@ def test_admin_order_analytics_devices_and_manual_order(app_and_bridge):
         "/api/admin/manual-order",
         json={
             "device_id": 1,
-            "boss_name": "ADM123",
+            "boss_name": "ADM1234",
             "run_minutes": 30,
             "selected_mode": "absolute",
             "max_rounds": 3,
@@ -836,9 +836,9 @@ def test_admin_order_analytics_devices_and_manual_order(app_and_bridge):
     assert added.status_code == 200
     assert added.json()["order"]["requested_minutes"] == 35
 
-    rejoin = admin.post(f"/api/admin/manual-rejoin/{order['id']}", json={"boss_name": "ADM456"})
+    rejoin = admin.post(f"/api/admin/manual-rejoin/{order['id']}", json={"boss_name": "ADM4567"})
     assert rejoin.status_code == 200, rejoin.text
-    assert rejoin.json()["order"]["team_code"] == "ADM456"
+    assert rejoin.json()["order"]["team_code"] == "ADM4567"
 
     stop = admin.post("/api/admin/devices/1/command", json={"action": "stop_current"})
     assert stop.status_code == 200, stop.text
@@ -857,6 +857,56 @@ def test_admin_order_analytics_devices_and_manual_order(app_and_bridge):
     assert analytics["requested_minutes"] >= 30
     assert analytics["daily_series"]
     assert analytics["customer_rank"]
+
+
+def test_admin_manual_order_modal_matches_legacy_controls(app_and_bridge):
+    app, _bridge = app_and_bridge
+    admin = TestClient(app)
+    assert admin.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+    html = admin.get("/merchant-admin").text
+    for snippet in [
+        '<div class="modal-head">手动下单</div>',
+        'id="manualDeviceInfo"',
+        'id="manualBossName"',
+        'id="manualHybridModeSection"',
+        '时长（小时）',
+        'max="9999"',
+        '时长（分钟）',
+        '限制局数（0表示不限制）',
+        '限制亏币（单位：万，0表示不限制）',
+        'id="loadoutSection"',
+        'name="loadoutType"',
+        '大红包默认配装',
+        'id="adminCustomLoadoutOption"',
+        'id="customLoadoutFields"',
+        'id="loadoutHelmet"',
+        'id="loadoutArmor"',
+        'id="loadoutRig"',
+        'id="loadoutPistol"',
+        'id="loadoutBackpack"',
+        'id="loadoutCostDisplay"',
+        'id="manualOrderBtn"',
+        'function openManualOrderModal',
+        'function closeManualOrderModal',
+        'function autoCalculateRounds',
+        'function toggleLoadoutCustom',
+        'function calculateLoadoutCost',
+    ]:
+        assert snippet in html
+
+
+def test_admin_manual_order_infers_device_mode_like_legacy_payload(tmp_path):
+    class AbsoluteDeviceBridge(FakeBridge):
+        def list_devices(self) -> list[dict[str, Any]]:
+            return [{"id": 1, "device_id": 1, "display_name": "1号机", "online": True, "control_state": "idle", "mode": "absolute"}]
+
+    bridge = AbsoluteDeviceBridge(capacity=1)
+    app = create_app(db_path=tmp_path / "manual-mode.sqlite", bridge_client=bridge)
+    admin = TestClient(app)
+    assert admin.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+    manual = admin.post("/api/admin/manual-order", json={"device_id": 1, "boss_name": "ABS1234", "run_minutes": 1})
+    assert manual.status_code == 200, manual.text
+    assert manual.json()["order"]["quality"] == "secret"
 
 
 def test_manual_order_same_device_concurrency_guard(tmp_path):

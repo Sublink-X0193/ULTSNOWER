@@ -265,6 +265,38 @@ python -m pytest -q
 
 结果：24 passed。
 
+## 9. 2026-06-01 管理员手动下单旧版 1:1 对齐
+
+- 手动下单弹窗按旧版恢复控件和文案：
+  - 组队码。
+  - 混合模式选择：按机密下单 / 按绝密下单。
+  - 时长（小时）最大 `9999`。
+  - 时长（分钟）。
+  - 限制局数。
+  - 限制亏币（单位：万）。
+  - 绝密配装区域。
+  - 大红包默认配装 / 自定义配装。
+  - 头部、护甲、胸挂、手枪、背包装备。
+  - 配装总价展示。
+- 保留旧版函数名与控件 ID，减少旧代码/操作习惯断裂：
+  - `openManualOrderModal`
+  - `closeManualOrderModal`
+  - `autoCalculateRounds`
+  - `toggleLoadoutCustom`
+  - `calculateLoadoutCost`
+- 后端兼容旧版 payload：
+  - 非混合模式不传 `selected_mode` 时，根据设备模式自动推断机密/绝密。
+  - 手动下单时长上限同步放宽到旧版控件范围。
+
+最新验证：
+
+```text
+python -m compileall -q src tests
+python -m pytest -q
+```
+
+结果：26 passed。
+
 ## 8. 2026-06-01 旧版直控/手动下单兼容补强
 
 ### 8.1 手动下单弹窗向旧版靠齐
