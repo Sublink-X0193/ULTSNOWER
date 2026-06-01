@@ -2748,12 +2748,15 @@ function updateDeviceStatusBadge(rows) {
   const colors = {'空闲':'#16a34a','已进队':'#2563eb','配装中':'#2563eb','游戏中':'#2563eb','执行中':'#2563eb','离线':'#ef4444','不在线':'#ef4444','已结束':'#6b7280','等待救援':'#d97706','进队异常':'#dc2626','进队失败':'#dc2626'};
   const parts = Object.entries(statusCount).map(([s,n]) => `<span style="color:${colors[s] || '#6b7280'};font-weight:600;">${esc(s)}</span> <span>${esc(n)}</span>`);
   const total = (rows || []).length;
-  const enabled = (rows || []).filter(d => d.enabled !== false).length;
-  const accepting = (rows || []).filter(d => d.enabled !== false && d.accept_orders !== false).length;
+  const onlineEnabled = (rows || []).filter(d => d.online && d.enabled !== false).length;
+  const canAccept = (rows || []).filter(d => {
+    const s = d.work_status || (d.online ? '未知' : '离线');
+    return d.online && d.enabled !== false && d.accept_orders !== false && s === '空闲' && !d.running_order_id;
+  }).length;
   const online = (rows || []).filter(d => d.online).length;
   parts.push(`<span style="color:#6b7280;">|</span> <span style="color:#374151;">在线</span> <b style="color:#3b82f6;">${online}/${total}</b>`);
-  parts.push(`<span style="color:#374151;">启用</span> <b style="color:#3b82f6;">${enabled}/${total}</b>`);
-  parts.push(`<span style="color:#374151;">接单</span> <b style="color:#16a34a;">${accepting}/${enabled}</b>`);
+  parts.push(`<span style="color:#374151;">在线启用</span> <b style="color:#3b82f6;">${onlineEnabled}/${total}</b>`);
+  parts.push(`<span style="color:#374151;">可接单</span> <b style="color:#16a34a;">${canAccept}/${onlineEnabled}</b>`);
   badge.innerHTML = parts.join('<span style="color:#d1d5db;">·</span>');
 }
 function onDeviceSortChange() { loadDevicesAdmin(); }
@@ -2790,6 +2793,19 @@ function renderDevicesAdmin(rows) {
       const coinLoss = startCoins > 0 && currentCoins > 0 ? Math.max(0, (startCoins - currentCoins) / 10000) : Number(d.actual_coin_loss || 0);
       const limit = Number(d.max_coin_loss || 0) > 0 ? Number(d.max_coin_loss || 0) + '万' : '无限制';
       coinText = `${coinLoss ? coinLoss.toFixed(1) : '0.0'}万/${limit}`;
+    }
+    const enableBadge = d.enabled === false ? '<span class="badge badge-offline">禁用</span>' : (d.online ? '<span class="badge badge-online">启用</span>' : '<span class="badge badge-offline">离线</span>');
+    let intakeBadge = '<span class="badge badge-offline" style="margin-top:4px">不接单</span>';
+    if (d.enabled === false) {
+      intakeBadge = '<span class="badge badge-offline" style="margin-top:4px">不接单</span>';
+    } else if (!d.online) {
+      intakeBadge = '<span class="badge badge-offline" style="margin-top:4px">离线不接单</span>';
+    } else if (d.accept_orders === false) {
+      intakeBadge = '<span class="badge badge-waiting" style="margin-top:4px">停止接单</span>';
+    } else if (status === '空闲' && !d.running_order_id) {
+      intakeBadge = '<span class="badge badge-done" style="margin-top:4px">可接单</span>';
+    } else {
+      intakeBadge = '<span class="badge badge-waiting" style="margin-top:4px">占用中</span>';
     }
     // 操作控件按旧版 1:1：空闲只露出手动下单；运行中露出换队/加减时/结束/等待救援切换；
     // 其余维护动作统一收进“更多 ▴”下拉菜单。
@@ -2851,7 +2867,7 @@ function renderDevicesAdmin(rows) {
       <td>${esc(roundText)}</td>
       <td>${esc(coinText)}</td>
       <td><span class="hint">${esc(d.script_ver || '--')}</span></td>
-      <td>${d.enabled === false ? '<span class="badge badge-offline">禁用</span>' : '<span class="badge badge-online">启用</span>'}${d.accept_orders === false ? '<div><span class="badge badge-waiting" style="margin-top:4px">停止接单</span></div>' : '<div><span class="badge badge-done" style="margin-top:4px">接单中</span></div>'}</td>
+      <td>${enableBadge}<div>${intakeBadge}</div></td>
       <td style="display:flex;gap:4px;flex-wrap:wrap;min-width:260px;">${actionBtns}</td>
     </tr>`;
   }).join('') + '</tbody></table>';
