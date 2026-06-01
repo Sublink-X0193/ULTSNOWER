@@ -1570,6 +1570,14 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
     .btn-green { background:#22c55e; color:#fff; } .btn-green:hover{background:#16a34a}
     .btn-purple { background:#7c3aed; color:#fff; } .btn-purple:hover{background:#6d28d9}
     .btn-amber { background:#f59e0b; color:#fff; } .btn-amber:hover{background:#d97706}
+    .dropdown { position: relative; display: inline-block; }
+    .dropdown-menu { display: none; position: absolute; right: 0; top: 100%; background:#fff; border:1px solid #e5e7eb; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,.1); min-width:120px; z-index:50; padding:4px 0; }
+    .dropdown-menu.up { top:auto; bottom:100%; box-shadow:0 -4px 12px rgba(0,0,0,.1); }
+    .dropdown.open .dropdown-menu { display:block; }
+    .dropdown-item { display:block; width:100%; padding:8px 14px; border:none; background:none; text-align:left; font-size:12px; cursor:pointer; color:#374151; white-space:nowrap; }
+    .dropdown-item:hover { background:#f3f4f6; }
+    .dropdown-item.text-danger { color:#ef4444; }
+    .dropdown-item.text-danger:hover { background:#fef2f2; }
     .grid { display:grid; gap:14px; }
     .stats-grid { grid-template-columns: repeat(6, minmax(150px, 1fr)); }
     .stat-card { background:#fff; border:1px solid #e5e7eb; border-radius:12px; padding:16px; box-shadow:0 1px 3px rgba(0,0,0,.04); }
@@ -2554,28 +2562,50 @@ function renderDevicesAdmin(rows) {
       const limit = Number(d.max_coin_loss || 0) > 0 ? Number(d.max_coin_loss || 0) + '万' : '无限制';
       coinText = `${coinLoss ? coinLoss.toFixed(1) : '0.0'}万/${limit}`;
     }
-    const canManual = d.online && d.enabled !== false && status === '空闲' && !(o || d.running_order_id);
+    // 操作控件按旧版 1:1：空闲只露出手动下单；运行中露出换队/加减时/结束/等待救援切换；
+    // 其余维护动作统一收进“更多 ▴”下拉菜单。
     let actionBtns = '';
-    if (canManual) actionBtns += `<button class="btn-sm btn-green" onclick="openManualOrder(${d.id}, decodeURIComponent('${encName}'), '${esc(mode)}')">手动下单</button>`;
-    if (o) {
-      const oid = o.id;
-      actionBtns += `<button class="btn-sm btn-purple" onclick="openAdminRejoin(${oid}, decodeURIComponent('${encodeURIComponent(runBoss || '')}'))">换队</button>`;
-      actionBtns += `<button class="btn-sm btn-primary" onclick="adjustOrder(${oid})">加减时</button>`;
-      actionBtns += `<button class="btn-sm btn-danger" onclick="stopOrder(${oid})">结束</button>`;
-      actionBtns += `<button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'ready')">准备</button>`;
-      actionBtns += `<button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'watch')">观战</button>`;
-      actionBtns += `<button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'switch_spectate')">切观战</button>`;
-      actionBtns += `<button class="btn-sm btn-amber" onclick="sendDeviceCommand(${d.id}, 'restart_backup')">重启备用</button>`;
-      actionBtns += `<button class="btn-sm btn-purple" onclick="sendDeviceCommand(${d.id}, 'cleanup')">清理</button>`;
+    if (status === '空闲' && !d.running_order_id) {
+      actionBtns += `<button class="btn-sm btn-green" onclick="openManualOrderModal(${d.id}, decodeURIComponent('${encName}'), '${esc(mode)}')">手动下单</button>`;
     }
-    if (d.radar_url) actionBtns += `<button class="btn-sm btn-gray" onclick="copyText(decodeURIComponent('${encRadar}'))">📋 网址</button>`;
-    actionBtns += `<button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'restart')">异常重启</button>`;
-    actionBtns += `<button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'update')">远程更新</button>`;
-    actionBtns += `<button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'collect_log')">回收日志</button>`;
-    actionBtns += `<button class="btn-sm btn-purple" onclick="switchMode(${d.id}, '${esc(nextMode)}')">切为${nextMode === 'machine' ? '机密' : (nextMode === 'hybrid' ? '混合' : '绝密')}</button>`;
-    actionBtns += `<button class="btn-sm ${d.enabled === false ? 'btn-green' : 'btn-amber'}" onclick="toggleDevice(${d.id}, ${d.enabled === false ? 1 : 0})">${d.enabled === false ? '启用' : '禁用'}</button>`;
-    actionBtns += `<button class="btn-sm btn-primary" onclick="editDevice(${d.id}, decodeURIComponent('${encName}'), decodeURIComponent('${encKey}'), '${esc(mode)}', decodeURIComponent('${encRadar}'), decodeURIComponent('${encWatchdog}'))">编辑</button>`;
-    if (!o) actionBtns += `<button class="btn-sm btn-danger" onclick="deleteDevice(${d.id})">删除</button>`;
+    if (d.running_order_id) {
+      actionBtns += `<button class="btn-sm btn-purple" onclick="adminRejoin(${d.running_order_id})">换队</button>`;
+      actionBtns += `<button class="btn-sm btn-primary" onclick="openAddTimeModal(${d.running_order_id}, decodeURIComponent('${encName}'), ${rem}, ${Number(d.max_rounds || 0)}, ${Number(d.round_count || 0)}, ${Number(d.max_coin_loss || 0)})">加减时</button>`;
+      actionBtns += `<button class="btn-sm btn-danger" onclick="adminStopOrder(${d.running_order_id})">结束</button>`;
+      if (status === '等待救援') {
+        actionBtns += `<button class="btn-sm btn-amber" onclick="switchSpectate(${d.id}, ${d.running_order_id})">切换</button>`;
+      }
+    }
+    if (d.radar_url && String(d.radar_url).trim() !== '') {
+      actionBtns += `<button class="btn-sm btn-gray" onclick="copyOrOpenDeviceRadarUrl(this, decodeURIComponent('${encRadar}'))" title="单击复制 · 双击打开此设备的备注网址">📋 网址</button>`;
+    }
+    const modeCycleLabel = { machine: '切为机密', hybrid: '切为混合', absolute: '切为绝密' };
+    const newModeLabel = modeCycleLabel[nextMode] || '切换模式';
+    const wd = d.watchdog || {};
+    let wdBtnAttr = '';
+    let wdBtnTitle = '';
+    if (!wd.bound && !d.watchdog_card) {
+      wdBtnAttr = 'disabled style="opacity:0.5;cursor:not-allowed;"';
+      wdBtnTitle = '未绑定名刀卡号';
+    } else if (wd.bound && !wd.online) {
+      wdBtnAttr = 'disabled style="opacity:0.5;cursor:not-allowed;"';
+      wdBtnTitle = '名刀离线';
+    } else {
+      wdBtnTitle = wd.pending_restart ? '已发送重启指令，等待名刀执行' : '名刀在线';
+    }
+    actionBtns += `<div class="dropdown" onclick="toggleDropdown(event, this)">
+        <button class="btn-sm btn-gray">更多 ▴</button>
+        <div class="dropdown-menu">
+            <button class="dropdown-item" onclick="restartDevice(decodeURIComponent('${encKey}'), decodeURIComponent('${encName}'))">异常重启</button>
+            <button class="dropdown-item" onclick="restartBackupPC(${d.id}, decodeURIComponent('${encName}'))" ${wdBtnAttr} title="${esc(wdBtnTitle)}">重启备用电脑</button>
+            <button class="dropdown-item" onclick="updateDevice(decodeURIComponent('${encKey}'), decodeURIComponent('${encName}'))">远程更新</button>
+            <button class="dropdown-item" onclick="collectLog(decodeURIComponent('${encKey}'), decodeURIComponent('${encName}'))">回收日志</button>
+            <button class="dropdown-item" onclick="switchMode(${d.id}, '${esc(nextMode)}')">${newModeLabel}</button>
+            <button class="dropdown-item" onclick="toggleDevice(${d.id}, ${d.enabled ? 0 : 1})">${d.enabled ? '禁用设备' : '启用设备'}</button>
+            <button class="dropdown-item" onclick="editDevice(${d.id}, decodeURIComponent('${encName}'), decodeURIComponent('${encKey}'), '${esc(mode)}', decodeURIComponent('${encRadar}'), decodeURIComponent('${encWatchdog}'))">编辑设备</button>
+            <button class="dropdown-item text-danger" onclick="deleteDevice(${d.id})">删除设备</button>
+        </div>
+    </div>`;
     return `<tr>
       <td>${esc(d.id)}</td>
       <td><b>${esc(devName)}</b><div class="hint" style="font-family:monospace">${esc(shortKey)}</div></td>
@@ -2665,6 +2695,102 @@ async function deleteDevice(id) {
     toast('删除成功');
     await loadDevicesAdmin();
   } catch(e) { toast(e.message); }
+}
+const _radarBtnTimers = new WeakMap();
+function copyOrOpenDeviceRadarUrl(btn, url) {
+  if (!url) return;
+  const existing = _radarBtnTimers.get(btn);
+  if (existing) {
+    clearTimeout(existing);
+    _radarBtnTimers.delete(btn);
+    try { window.open(url, '_blank'); }
+    catch(e) { appAlert('打开失败：' + e.message); }
+    return;
+  }
+  const t = setTimeout(() => {
+    _radarBtnTimers.delete(btn);
+    copyText(url);
+  }, 280);
+  _radarBtnTimers.set(btn, t);
+}
+function adminRejoin(orderId) { openAdminRejoin(orderId, ''); }
+function adminStopOrder(orderId) { stopOrder(orderId); }
+function openAddTimeModal(orderId, deviceName, remainMinutes, maxRounds, roundCount, maxCoinLoss) {
+  $('addTimeOrderId').value = orderId;
+  const remainRounds = Math.max(0, Number(maxRounds || 0) - Number(roundCount || 0));
+  $('addTimeInfo').innerHTML =
+    `设备: <b>${esc(deviceName)}</b> · 订单#${esc(orderId)}<br>` +
+    `当前剩余时间: <b>${fmtMin(remainMinutes)}</b> · ` +
+    `剩余局数: <b>${remainRounds}</b>(已打${Number(roundCount || 0)}/${Number(maxRounds || 0)}) · ` +
+    `亏币上限: <b>${Number(maxCoinLoss || 0)}</b>万`;
+  document.querySelector('input[name="addTimeOp"][value="add"]').checked = true;
+  $('addTimeHours').value = 0;
+  $('addTimeMinutes').value = 0;
+  openModal('addTimeModal');
+}
+async function switchSpectate(deviceId, orderId) {
+  const ok = await appConfirm('切换观战', '确定要切换观战目标？', 'btn-amber');
+  if (!ok) return;
+  try {
+    await api(`/api/admin/devices/${deviceId}/command`, {method:'POST', body:JSON.stringify({action:'switch_spectate', params:{order_id:orderId, operator:'merchant_admin'}})});
+    appAlert('已发送切换指令');
+    await loadDevicesAdmin();
+  } catch(e) { appAlert(e.message); }
+}
+function toggleDropdown(e, el) {
+  e.stopPropagation();
+  document.querySelectorAll('.dropdown.open').forEach(d => { if (d !== el) d.classList.remove('open'); });
+  el.classList.toggle('open');
+  if (el.classList.contains('open')) {
+    const menu = el.querySelector('.dropdown-menu');
+    if (menu) {
+      menu.classList.remove('up');
+      const rect = el.getBoundingClientRect();
+      const menuHeight = menu.offsetHeight || 160;
+      const spaceBelow = window.innerHeight - rect.bottom;
+      const spaceAbove = rect.top;
+      if (spaceBelow < menuHeight && spaceAbove > spaceBelow) menu.classList.add('up');
+    }
+  }
+}
+document.addEventListener('click', () => {
+  document.querySelectorAll('.dropdown.open').forEach(d => d.classList.remove('open'));
+});
+async function restartDevice(deviceKey, deviceName) {
+  const ok = await appConfirm('异常重启', `确定异常重启设备 "${deviceName}" 吗？\n\n脚本将关闭并重新启动，启动后进入恢复脚本阶段。\n如果有正在运行的订单，服务器将重新下发。`, 'btn-amber');
+  if (!ok) return;
+  try {
+    await api(`/api/admin/machines/${encodeURIComponent(deviceKey)}/restart`, {method:'POST', body:'{}'});
+    appAlert('已发送重启指令，等待客户端执行');
+    await loadDevicesAdmin();
+  } catch(e) { appAlert(e.message); }
+}
+async function restartBackupPC(deviceId, deviceName) {
+  const ok = await appConfirm('重启备用电脑', `确定重启设备 "${deviceName}" 的备用电脑吗？\n\n名刀收到指令后会立刻关闭并重新启动备用电脑，整个过程通常 30~60 秒。`, 'btn-amber');
+  if (!ok) return;
+  try {
+    const data = await api(`/api/admin/devices/${deviceId}/restart_backup`, {method:'POST', body:'{}'});
+    appAlert(data.msg || '已发送重启指令');
+    await loadDevicesAdmin();
+  } catch(e) { appAlert(e.message); }
+}
+async function updateDevice(deviceKey, deviceName) {
+  const ok = await appConfirm('远程更新', `确定远程更新设备 "${deviceName}" 的脚本吗？\n\n更新期间该设备版本号将显示为红色。\n同一时间只能有一台设备在更新。`, 'btn-amber');
+  if (!ok) return;
+  try {
+    await api(`/api/admin/machines/${encodeURIComponent(deviceKey)}/update`, {method:'POST', body:'{}'});
+    appAlert('已发送更新指令，等待客户端执行');
+    await loadDevicesAdmin();
+  } catch(e) { appAlert(e.message); }
+}
+async function collectLog(deviceKey, deviceName) {
+  const ok = await appConfirm('回收日志', `确定回收设备 "${deviceName}" 的运行日志吗？\n\n客户端将自动上传最新的日志文件到服务器。`, 'btn-primary');
+  if (!ok) return;
+  try {
+    await api(`/api/admin/machines/${encodeURIComponent(deviceKey)}/collect_log`, {method:'POST', body:'{}'});
+    appAlert('已发送日志回收指令，等待客户端上传');
+    await loadDevicesAdmin();
+  } catch(e) { appAlert(e.message); }
 }
 let _manualOrderMode = 'machine';
 let _adminMaxLoadoutCost = 650000;

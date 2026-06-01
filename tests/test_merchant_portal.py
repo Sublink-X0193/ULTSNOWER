@@ -956,7 +956,31 @@ def test_admin_device_code_and_mode_management(app_and_bridge):
     admin = TestClient(app)
     assert admin.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
     html = admin.get("/merchant-admin").text
-    for snippet in ["openAddDeviceModal", "submitDevice", "switchMode", "toggleDevice", "机器ID / 设备码", "老板ID", "哈币", "已打局", "已打币"]:
+    for snippet in [
+        "openAddDeviceModal",
+        "submitDevice",
+        "switchMode",
+        "toggleDevice",
+        "机器ID / 设备码",
+        "老板ID",
+        "哈币",
+        "已打局",
+        "已打币",
+        "更多 ▴",
+        "异常重启",
+        "重启备用电脑",
+        "远程更新",
+        "回收日志",
+        "禁用设备",
+        "编辑设备",
+        "删除设备",
+        "copyOrOpenDeviceRadarUrl",
+        "toggleDropdown",
+        "restartDevice",
+        "restartBackupPC",
+        "updateDevice",
+        "collectLog",
+    ]:
         assert snippet in html
 
     created = admin.post("/api/admin/devices", json={"device_name": "新设备", "device_key": "new-machine-code", "mode": "hybrid", "radar_url": "https://radar.local/x", "watchdog_card": "wd-1"})
