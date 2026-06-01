@@ -758,8 +758,16 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
             customer_id,
             balance_minutes=body.get("balance_minutes") if "balance_minutes" in body else None,
             balance_rounds=body.get("balance_rounds") if "balance_rounds" in body else None,
+            balance_machine_minutes=body.get("balance_machine_minutes") if "balance_machine_minutes" in body else None,
+            balance_machine_rounds=body.get("balance_machine_rounds") if "balance_machine_rounds" in body else None,
+            balance_absolute_minutes=body.get("balance_absolute_minutes") if "balance_absolute_minutes" in body else None,
+            balance_absolute_rounds=body.get("balance_absolute_rounds") if "balance_absolute_rounds" in body else None,
             delta_minutes=body.get("delta_minutes") if "delta_minutes" in body else None,
             delta_rounds=body.get("delta_rounds") if "delta_rounds" in body else None,
+            delta_machine_minutes=body.get("delta_machine_minutes") if "delta_machine_minutes" in body else None,
+            delta_machine_rounds=body.get("delta_machine_rounds") if "delta_machine_rounds" in body else None,
+            delta_absolute_minutes=body.get("delta_absolute_minutes") if "delta_absolute_minutes" in body else None,
+            delta_absolute_rounds=body.get("delta_absolute_rounds") if "delta_absolute_rounds" in body else None,
         )
         return json_ok(customer=customer)
 
@@ -798,6 +806,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
             mode=body.get("mode") or "machine",
             radar_url=body.get("radar_url") or "",
             watchdog_card=body.get("watchdog_card") or "",
+            accept_orders=truthy(body.get("accept_orders")) if "accept_orders" in body else True,
         )
         return json_ok(msg="创建设备成功", device=device)
 
@@ -813,6 +822,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
             radar_url=body.get("radar_url") if "radar_url" in body else None,
             watchdog_card=body.get("watchdog_card") if "watchdog_card" in body else None,
             enabled=truthy(body.get("enabled")) if "enabled" in body else None,
+            accept_orders=truthy(body.get("accept_orders")) if "accept_orders" in body else None,
         )
         return json_ok(msg="保存成功", device=device)
 
@@ -825,6 +835,13 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     def api_admin_device_toggle(device_id: int, body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
         require_owner_admin(admin)
         return json_ok(msg="保存成功", device=service.admin_set_device_enabled(admin, device_id, truthy(body.get("enabled"))))
+
+    @app.put("/api/admin/devices/{device_id}/accept-orders")
+    def api_admin_device_accept_orders(device_id: int, body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
+        require_owner_admin(admin)
+        accept_orders = truthy(body.get("accept_orders"))
+        msg = "已恢复接单" if accept_orders else "已停止接单"
+        return json_ok(msg=msg, device=service.admin_set_device_accept_orders(admin, device_id, accept_orders))
 
     @app.delete("/api/admin/devices/{device_id}")
     def api_admin_device_delete(device_id: int, admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
@@ -1300,6 +1317,8 @@ def _legacy_available_devices(devices: list[dict[str, Any]]) -> list[dict[str, A
     for d in devices:
         if d.get("enabled") is False:
             continue
+        if d.get("accept_orders") is False:
+            continue
         if not d.get("online"):
             continue
         if d.get("running_order_id"):
@@ -1315,11 +1334,12 @@ def _legacy_available_devices(devices: list[dict[str, Any]]) -> list[dict[str, A
 
 def _capacity_from_legacy_devices(devices: list[dict[str, Any]]) -> dict[str, Any]:
     enabled = [d for d in devices if d.get("enabled") is not False]
-    idle = _legacy_available_devices(enabled)
+    orderable = [d for d in enabled if d.get("accept_orders") is not False]
+    idle = _legacy_available_devices(orderable)
     label = "many" if len(idle) >= 3 else ("few" if idle else "full")
     text = {"many": "空闲较多", "few": "空闲较少", "full": "满机"}[label]
     earliest = 0
-    for d in enabled:
+    for d in orderable:
         end_ms = _to_int(d.get("end_time_ms"), 0)
         if end_ms > int(datetime.now(timezone.utc).timestamp() * 1000):
             earliest = end_ms if not earliest else min(earliest, end_ms)
@@ -1328,7 +1348,9 @@ def _capacity_from_legacy_devices(devices: list[dict[str, Any]]) -> dict[str, An
         "capacity_label": label,
         "capacity_text": text,
         "idle_count": len(idle),
-        "total_count": len(enabled),
+        "total_count": len(orderable),
+        "physical_total_count": len(enabled),
+        "stopped_order_count": len(enabled) - len(orderable),
         "idle_device_ids": [int(d.get("id") or 0) for d in idle if int(d.get("id") or 0) > 0],
         "full_hint": "" if idle else ("距离最近下机还有一段时间" if earliest else "当前无空闲机器"),
         "earliest_end_time_ms": earliest,
@@ -1349,6 +1371,8 @@ def _legacy_devices_status(service: Any, customer: dict[str, Any]) -> dict[str, 
         for d in admin_devices:
             if d.get("enabled") is False:
                 continue
+            if d.get("accept_orders") is False and not d.get("running_order_id"):
+                continue
             did = int(d.get("id") or d.get("device_id") or 0)
             if did <= 0:
                 continue
@@ -1366,6 +1390,7 @@ def _legacy_devices_status(service: Any, customer: dict[str, Any]) -> dict[str, 
                 "mode": mode,
                 "mode_label": _legacy_mode_label(mode),
                 "enabled": d.get("enabled") is not False,
+                "accept_orders": d.get("accept_orders") is not False,
                 "work_status": work_status,
                 "running_order_id": d.get("running_order_id"),
                 "running_user_id": d.get("running_user_id"),
@@ -1432,6 +1457,7 @@ def _legacy_devices_status(service: Any, customer: dict[str, Any]) -> dict[str, 
             "mode": view["mode"],
             "mode_label": "绝密" if view["mode"] == "absolute" else "机密",
             "enabled": True,
+            "accept_orders": True,
             "work_status": status,
             "running_order_id": int(order.get("id") or 0),
             "running_user_id": int(order.get("customer_id") or 0),
@@ -2202,15 +2228,21 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
 
   <div id="changeBalanceModal" class="modal-mask">
     <div class="modal">
-      <div class="modal-head">修改客户剩余时长</div>
+      <div class="modal-head">修改客户剩余时长 / 局数</div>
       <div class="modal-body">
         <input id="changeBalUserId" type="hidden">
         <div class="info-box" id="changeBalInfo">--</div>
-        <div class="field-row" style="margin-top:12px">
-          <div class="field"><label>分钟余额</label><input id="changeBalanceMinutes" type="number" min="0" value="0"></div>
-          <div class="field"><label>局数余额</label><input id="changeBalanceRounds" type="number" min="0" value="0"></div>
+        <div class="section-title" style="margin-top:12px">机密余额</div>
+        <div class="field-row" style="margin-top:8px">
+          <div class="field"><label>机密分钟</label><input id="changeMachineMinutes" type="number" min="0" value="0"></div>
+          <div class="field"><label>机密局数</label><input id="changeMachineRounds" type="number" min="0" value="0"></div>
         </div>
-        <div class="hint">直接填写调整后的余额。负数增减请在订单管理里用“加减时”。</div>
+        <div class="section-title" style="margin-top:12px">绝密余额</div>
+        <div class="field-row" style="margin-top:8px">
+          <div class="field"><label>绝密分钟</label><input id="changeAbsoluteMinutes" type="number" min="0" value="0"></div>
+          <div class="field"><label>绝密局数</label><input id="changeAbsoluteRounds" type="number" min="0" value="0"></div>
+        </div>
+        <div class="hint">直接填写调整后的余额；机密和绝密分开保存，不再互相覆盖。</div>
       </div>
       <div class="modal-foot"><button class="btn-sm btn-gray" onclick="closeModal('changeBalanceModal')">取消</button><button class="btn-sm btn-green" onclick="submitBalance()">保存</button></div>
     </div>
@@ -2542,15 +2574,17 @@ async function loadCustomers(keyword, onlineOnly=false) {
 }
 function renderCustomers(rows, target) {
   if (!rows.length) { $(target).innerHTML = '<div class="empty-state">暂无客户</div>'; return; }
+  const balanceCell = (label, minutes, rounds) => `<div><span class="badge ${label === '机密' ? 'badge-machine' : 'badge-absolute'}">${label}</span> <b>${fmtMin(minutes)}</b></div><div class="hint">局数：${esc(rounds || 0)}</div>`;
   $(target).innerHTML = `<table class="data-table"><thead><tr>
-    <th>ID</th><th>客户</th><th>在线</th><th>状态</th><th>剩余分钟</th><th>局数</th><th>当前订单</th><th>最后在线</th><th>操作</th>
+    <th>ID</th><th>客户</th><th>在线</th><th>状态</th><th>机密余额</th><th>绝密余额</th><th>当前订单</th><th>最后在线</th><th>操作</th>
   </tr></thead><tbody>` + rows.map(c => `<tr>
     <td>${c.id}</td><td><b>${esc(c.username)}</b></td><td>${onlineBadge(c.online)}</td><td>${statusBadge(c.status)}</td>
-    <td><b>${fmtMin(c.balance_minutes)}</b></td><td>${esc(c.balance_rounds)}</td>
+    <td>${balanceCell('机密', c.balance_machine_minutes ?? c.balance_minutes, c.balance_machine_rounds ?? c.balance_rounds)}</td>
+    <td>${balanceCell('绝密', c.balance_absolute_minutes || 0, c.balance_absolute_rounds || 0)}</td>
     <td>${c.active_order ? `${statusBadge(c.active_order.status)} 剩 ${fmtMin(c.active_order.remaining_minutes)}` : '-'}</td>
     <td>${fmtDate(c.last_seen_at)}</td>
     <td>
-      <button class="btn-sm btn-green" onclick="editBalance(${c.id}, ${c.balance_minutes}, ${c.balance_rounds}, decodeURIComponent('${encodeURIComponent(c.username)}'))">调时长</button>
+      <button class="btn-sm btn-green" onclick="editBalance(${c.id}, ${Number(c.balance_machine_minutes ?? c.balance_minutes ?? 0)}, ${Number(c.balance_machine_rounds ?? c.balance_rounds ?? 0)}, ${Number(c.balance_absolute_minutes || 0)}, ${Number(c.balance_absolute_rounds || 0)}, decodeURIComponent('${encodeURIComponent(c.username)}'))">调余额</button>
       <button class="btn-sm btn-gray" onclick="resetPwd(${c.id}, decodeURIComponent('${encodeURIComponent(c.username)}'))">改密码</button>
       <button class="btn-sm btn-amber" onclick="setCustomerStatus(${c.id}, '${c.status === 'active' ? 'frozen' : 'active'}')">${c.status === 'active' ? '冻结' : '解冻'}</button>
       <button class="btn-sm btn-purple" onclick="showCustomerOrders(${c.id}, decodeURIComponent('${encodeURIComponent(c.username)}'))">历史</button>
@@ -2575,18 +2609,22 @@ async function submitCreateCustomer() {
     closeModal('addUserModal'); toast('客户创建成功'); await loadCustomers(); await loadOverview();
   } catch(e) { toast(e.message); }
 }
-function editBalance(id, oldMinutes, oldRounds, username='') {
+function editBalance(id, machineMinutes, machineRounds, absoluteMinutes, absoluteRounds, username='') {
   $('changeBalUserId').value = id;
   $('changeBalInfo').textContent = `客户：${username || id}`;
-  $('changeBalanceMinutes').value = oldMinutes || 0;
-  $('changeBalanceRounds').value = oldRounds || 0;
+  $('changeMachineMinutes').value = machineMinutes || 0;
+  $('changeMachineRounds').value = machineRounds || 0;
+  $('changeAbsoluteMinutes').value = absoluteMinutes || 0;
+  $('changeAbsoluteRounds').value = absoluteRounds || 0;
   openModal('changeBalanceModal');
 }
 async function submitBalance() {
   const id = $('changeBalUserId').value;
   const body = {
-    balance_minutes: Number($('changeBalanceMinutes').value || 0),
-    balance_rounds: Number($('changeBalanceRounds').value || 0),
+    balance_machine_minutes: Number($('changeMachineMinutes').value || 0),
+    balance_machine_rounds: Number($('changeMachineRounds').value || 0),
+    balance_absolute_minutes: Number($('changeAbsoluteMinutes').value || 0),
+    balance_absolute_rounds: Number($('changeAbsoluteRounds').value || 0),
   };
   try {
     await api(`/api/admin/customers/${id}/balance`, {method:'PUT', body:JSON.stringify(body)});
@@ -2711,9 +2749,11 @@ function updateDeviceStatusBadge(rows) {
   const parts = Object.entries(statusCount).map(([s,n]) => `<span style="color:${colors[s] || '#6b7280'};font-weight:600;">${esc(s)}</span> <span>${esc(n)}</span>`);
   const total = (rows || []).length;
   const enabled = (rows || []).filter(d => d.enabled !== false).length;
+  const accepting = (rows || []).filter(d => d.enabled !== false && d.accept_orders !== false).length;
   const online = (rows || []).filter(d => d.online).length;
   parts.push(`<span style="color:#6b7280;">|</span> <span style="color:#374151;">在线</span> <b style="color:#3b82f6;">${online}/${total}</b>`);
   parts.push(`<span style="color:#374151;">启用</span> <b style="color:#3b82f6;">${enabled}/${total}</b>`);
+  parts.push(`<span style="color:#374151;">接单</span> <b style="color:#16a34a;">${accepting}/${enabled}</b>`);
   badge.innerHTML = parts.join('<span style="color:#d1d5db;">·</span>');
 }
 function onDeviceSortChange() { loadDevicesAdmin(); }
@@ -2723,7 +2763,7 @@ function renderDevicesAdmin(rows) {
   if (!rows.length) { $('devicesTable').innerHTML = '<div class="empty-state">暂无设备；请先在 /setup 配置 Bridge API Key，并确认中央 Bridge 已有 Agent 或点击添加设备。</div>'; return; }
   $('devicesTable').innerHTML = `<table class="data-table"><thead><tr>
     <th>ID</th><th>名称/设备码</th><th>模式</th><th>在线</th><th>工作状态</th><th>详情</th>
-    <th>上机用户</th><th>剩余时长</th><th>预计结束</th><th>哈币</th><th>老板ID</th><th>已打局</th><th>已打币</th><th>版本</th><th>启用</th><th>操作</th>
+    <th>上机用户</th><th>剩余时长</th><th>预计结束</th><th>哈币</th><th>老板ID</th><th>已打局</th><th>已打币</th><th>版本</th><th>启用/接单</th><th>操作</th>
   </tr></thead><tbody>` + rows.map(d => {
     const o = d.active_order;
     const devName = d.device_name || (d.id + '号机');
@@ -2790,6 +2830,7 @@ function renderDevicesAdmin(rows) {
             <button class="dropdown-item" onclick="updateDevice(decodeURIComponent('${encKey}'), decodeURIComponent('${encName}'))">远程更新</button>
             <button class="dropdown-item" onclick="collectLog(decodeURIComponent('${encKey}'), decodeURIComponent('${encName}'))">回收日志</button>
             <button class="dropdown-item" onclick="switchMode(${d.id}, '${esc(nextMode)}')">${newModeLabel}</button>
+            <button class="dropdown-item" onclick="toggleAcceptOrders(${d.id}, ${d.accept_orders === false ? 1 : 0})">${d.accept_orders === false ? '恢复接单' : '停止接单'}</button>
             <button class="dropdown-item" onclick="toggleDevice(${d.id}, ${d.enabled ? 0 : 1})">${d.enabled ? '禁用设备' : '启用设备'}</button>
             <button class="dropdown-item" onclick="editDevice(${d.id}, decodeURIComponent('${encName}'), decodeURIComponent('${encKey}'), '${esc(mode)}', decodeURIComponent('${encRadar}'), decodeURIComponent('${encWatchdog}'))">编辑设备</button>
             <button class="dropdown-item text-danger" onclick="deleteDevice(${d.id})">删除设备</button>
@@ -2810,7 +2851,7 @@ function renderDevicesAdmin(rows) {
       <td>${esc(roundText)}</td>
       <td>${esc(coinText)}</td>
       <td><span class="hint">${esc(d.script_ver || '--')}</span></td>
-      <td>${d.enabled === false ? '<span class="badge badge-offline">禁用</span>' : '<span class="badge badge-online">启用</span>'}</td>
+      <td>${d.enabled === false ? '<span class="badge badge-offline">禁用</span>' : '<span class="badge badge-online">启用</span>'}${d.accept_orders === false ? '<div><span class="badge badge-waiting" style="margin-top:4px">停止接单</span></div>' : '<div><span class="badge badge-done" style="margin-top:4px">接单中</span></div>'}</td>
       <td style="display:flex;gap:4px;flex-wrap:wrap;min-width:260px;">${actionBtns}</td>
     </tr>`;
   }).join('') + '</tbody></table>';
@@ -2872,6 +2913,13 @@ async function switchMode(id, mode) {
 async function toggleDevice(id, enabled) {
   try {
     const d = await api(`/api/admin/devices/${id}/toggle`, {method:'PUT', body:JSON.stringify({enabled: !!enabled})});
+    toast(d.msg || '保存成功');
+    await loadDevicesAdmin();
+  } catch(e) { toast(e.message); }
+}
+async function toggleAcceptOrders(id, acceptOrders) {
+  try {
+    const d = await api(`/api/admin/devices/${id}/accept-orders`, {method:'PUT', body:JSON.stringify({accept_orders: !!acceptOrders})});
     toast(d.msg || '保存成功');
     await loadDevicesAdmin();
   } catch(e) { toast(e.message); }

@@ -72,18 +72,19 @@ class BridgeClient:
         data = self.request("GET", "/api/merchant/v1/devices")
         return data.get("devices") or []
 
-    def create_device(self, *, machine_id: str, display_name: str, mode: str = "machine", radar_url: str = "", watchdog_card: str = "", idem: str) -> dict[str, Any]:
+    def create_device(self, *, machine_id: str, display_name: str, mode: str = "machine", radar_url: str = "", watchdog_card: str = "", accept_orders: bool = True, idem: str) -> dict[str, Any]:
         body = {
             "machine_id": machine_id,
             "display_name": display_name,
             "mode": mode,
             "radar_url": radar_url,
             "watchdog_card": watchdog_card,
+            "accept_orders": bool(accept_orders),
         }
         data = self.request("POST", "/api/merchant/v1/devices", body=body, idem=idem)
         return data.get("device") or data
 
-    def update_device(self, device_id: int, *, machine_id: str | None = None, display_name: str | None = None, mode: str | None = None, radar_url: str | None = None, watchdog_card: str | None = None, enabled: bool | None = None, idem: str) -> dict[str, Any]:
+    def update_device(self, device_id: int, *, machine_id: str | None = None, display_name: str | None = None, mode: str | None = None, radar_url: str | None = None, watchdog_card: str | None = None, enabled: bool | None = None, accept_orders: bool | None = None, idem: str) -> dict[str, Any]:
         body: dict[str, Any] = {}
         if machine_id is not None:
             body["machine_id"] = machine_id
@@ -97,6 +98,8 @@ class BridgeClient:
             body["watchdog_card"] = watchdog_card
         if enabled is not None:
             body["enabled"] = bool(enabled)
+        if accept_orders is not None:
+            body["accept_orders"] = bool(accept_orders)
         data = self.request("PUT", f"/api/merchant/v1/devices/{int(device_id)}", body=body, idem=idem)
         return data.get("device") or data
 
@@ -106,6 +109,10 @@ class BridgeClient:
 
     def set_device_enabled(self, device_id: int, enabled: bool, *, idem: str) -> dict[str, Any]:
         data = self.request("PUT", f"/api/merchant/v1/devices/{int(device_id)}/toggle", body={"enabled": bool(enabled)}, idem=idem)
+        return data.get("device") or data
+
+    def set_device_accept_orders(self, device_id: int, accept_orders: bool, *, idem: str) -> dict[str, Any]:
+        data = self.request("PUT", f"/api/merchant/v1/devices/{int(device_id)}/accept-orders", body={"accept_orders": bool(accept_orders)}, idem=idem)
         return data.get("device") or data
 
     def delete_device(self, device_id: int, *, idem: str) -> dict[str, Any]:

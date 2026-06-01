@@ -769,31 +769,68 @@ class MerchantService:
             )
         return self.get_customer(customer["id"])
 
-    def admin_update_customer_balance(self, customer_id: int, *, balance_minutes: int | None = None, balance_rounds: int | None = None, delta_minutes: int | None = None, delta_rounds: int | None = None) -> dict[str, Any]:
+    def admin_update_customer_balance(
+        self,
+        customer_id: int,
+        *,
+        balance_minutes: int | None = None,
+        balance_rounds: int | None = None,
+        balance_machine_minutes: int | None = None,
+        balance_machine_rounds: int | None = None,
+        balance_absolute_minutes: int | None = None,
+        balance_absolute_rounds: int | None = None,
+        delta_minutes: int | None = None,
+        delta_rounds: int | None = None,
+        delta_machine_minutes: int | None = None,
+        delta_machine_rounds: int | None = None,
+        delta_absolute_minutes: int | None = None,
+        delta_absolute_rounds: int | None = None,
+    ) -> dict[str, Any]:
         with self.db.connect() as con:
             con.execute("BEGIN IMMEDIATE")
             try:
                 row = con.execute("SELECT * FROM customers WHERE id=?", (customer_id,)).fetchone()
                 if not row:
                     raise MerchantError("not_found", "客户不存在", 404)
-                minutes = int(row["balance_machine_minutes"] or 0)
-                rounds = int(row["balance_machine_rounds"] or 0)
+                machine_minutes = int(row["balance_machine_minutes"] or 0)
+                machine_rounds = int(row["balance_machine_rounds"] or 0)
+                absolute_minutes = int(row["balance_absolute_minutes"] or 0)
+                absolute_rounds = int(row["balance_absolute_rounds"] or 0)
+                # 兼容旧接口：balance_minutes / balance_rounds 仍表示“机密”余额。
                 if balance_minutes is not None:
-                    minutes = int(balance_minutes)
+                    machine_minutes = int(balance_minutes)
                 if balance_rounds is not None:
-                    rounds = int(balance_rounds)
+                    machine_rounds = int(balance_rounds)
+                if balance_machine_minutes is not None:
+                    machine_minutes = int(balance_machine_minutes)
+                if balance_machine_rounds is not None:
+                    machine_rounds = int(balance_machine_rounds)
+                if balance_absolute_minutes is not None:
+                    absolute_minutes = int(balance_absolute_minutes)
+                if balance_absolute_rounds is not None:
+                    absolute_rounds = int(balance_absolute_rounds)
                 if delta_minutes is not None:
-                    minutes += int(delta_minutes)
+                    machine_minutes += int(delta_minutes)
                 if delta_rounds is not None:
-                    rounds += int(delta_rounds)
-                minutes = max(0, minutes)
-                rounds = max(0, rounds)
+                    machine_rounds += int(delta_rounds)
+                if delta_machine_minutes is not None:
+                    machine_minutes += int(delta_machine_minutes)
+                if delta_machine_rounds is not None:
+                    machine_rounds += int(delta_machine_rounds)
+                if delta_absolute_minutes is not None:
+                    absolute_minutes += int(delta_absolute_minutes)
+                if delta_absolute_rounds is not None:
+                    absolute_rounds += int(delta_absolute_rounds)
+                machine_minutes = max(0, machine_minutes)
+                machine_rounds = max(0, machine_rounds)
+                absolute_minutes = max(0, absolute_minutes)
+                absolute_rounds = max(0, absolute_rounds)
                 con.execute(
                     """UPDATE customers
                        SET balance_machine_minutes=?,balance_machine_rounds=?,
-                           balance_absolute_minutes=0,balance_absolute_rounds=0
+                           balance_absolute_minutes=?,balance_absolute_rounds=?
                        WHERE id=?""",
-                    (minutes, rounds, customer_id),
+                    (machine_minutes, machine_rounds, absolute_minutes, absolute_rounds, customer_id),
                 )
                 self._sync_customer_balance_locked(con, customer_id)
                 con.commit()
@@ -1012,6 +1049,7 @@ class MerchantService:
             "mode": mode,
             "device_mode": mode,
             "enabled": bool(d.get("enabled", True)),
+            "accept_orders": bool(d.get("accept_orders", d.get("accepting_orders", d.get("order_enabled", True)))),
             "radar_url": d.get("radar_url") or runtime.get("radar_url") or "",
             "watchdog_card": d.get("watchdog_card") or runtime.get("watchdog_card") or "",
             "watchdog": runtime.get("watchdog") or {},
@@ -1138,21 +1176,21 @@ class MerchantService:
             raise MerchantError("bad_device_name", "设备名称不合法")
         return name
 
-    def admin_create_device(self, admin: dict[str, Any] | None, *, device_key: str, device_name: str, mode: str = "machine", radar_url: str = "", watchdog_card: str = "") -> dict[str, Any]:
+    def admin_create_device(self, admin: dict[str, Any] | None, *, device_key: str, device_name: str, mode: str = "machine", radar_url: str = "", watchdog_card: str = "", accept_orders: bool = True) -> dict[str, Any]:
         if not hasattr(self.bridge, "create_device"):
             raise MerchantError("bridge_unsupported", "中央 Bridge 当前不支持 API Key 设备新增，请先更新中央 Bridge", 501)
         device_key = self._validate_device_key(device_key)
         device_name = self._validate_device_name(device_name)
         mode = self._normalize_device_mode(mode)
         try:
-            dev = self.bridge.create_device(machine_id=device_key, display_name=device_name, mode=mode, radar_url=str(radar_url or "").strip(), watchdog_card=str(watchdog_card or "").strip(), idem=f"device-create:{device_key}:{iso()}")
+            dev = self.bridge.create_device(machine_id=device_key, display_name=device_name, mode=mode, radar_url=str(radar_url or "").strip(), watchdog_card=str(watchdog_card or "").strip(), accept_orders=bool(accept_orders), idem=f"device-create:{device_key}:{iso()}")
         except BridgeClientError as e:
             raise MerchantError(e.code, e.message, e.status_code)
         with self.db.connect() as con:
             self._log_admin_action_locked(con, admin, "device_create", "device", dev.get("id") or device_key, {"device_key": device_key, "device_name": device_name, "mode": mode})
         return dict(dev)
 
-    def admin_update_device(self, admin: dict[str, Any] | None, device_id: int, *, device_key: str | None = None, device_name: str | None = None, mode: str | None = None, radar_url: str | None = None, watchdog_card: str | None = None, enabled: bool | None = None) -> dict[str, Any]:
+    def admin_update_device(self, admin: dict[str, Any] | None, device_id: int, *, device_key: str | None = None, device_name: str | None = None, mode: str | None = None, radar_url: str | None = None, watchdog_card: str | None = None, enabled: bool | None = None, accept_orders: bool | None = None) -> dict[str, Any]:
         if not hasattr(self.bridge, "update_device"):
             raise MerchantError("bridge_unsupported", "中央 Bridge 当前不支持 API Key 设备编辑，请先更新中央 Bridge", 501)
         kwargs: dict[str, Any] = {}
@@ -1168,6 +1206,8 @@ class MerchantService:
             kwargs["watchdog_card"] = str(watchdog_card or "").strip()
         if enabled is not None:
             kwargs["enabled"] = bool(enabled)
+        if accept_orders is not None:
+            kwargs["accept_orders"] = bool(accept_orders)
         try:
             dev = self.bridge.update_device(int(device_id), **kwargs, idem=f"device-update:{int(device_id)}:{iso()}")
         except BridgeClientError as e:
@@ -1197,6 +1237,20 @@ class MerchantService:
             raise MerchantError(e.code, e.message, e.status_code)
         with self.db.connect() as con:
             self._log_admin_action_locked(con, admin, "device_toggle", "device", device_id, {"enabled": bool(enabled)})
+        return dict(dev)
+
+    def admin_set_device_accept_orders(self, admin: dict[str, Any] | None, device_id: int, accept_orders: bool) -> dict[str, Any]:
+        if not hasattr(self.bridge, "set_device_accept_orders") and not hasattr(self.bridge, "update_device"):
+            raise MerchantError("bridge_unsupported", "中央 Bridge 当前不支持 API Key 停止/恢复接单，请先更新中央 Bridge", 501)
+        try:
+            if hasattr(self.bridge, "set_device_accept_orders"):
+                dev = self.bridge.set_device_accept_orders(int(device_id), bool(accept_orders), idem=f"device-accept-orders:{int(device_id)}:{int(bool(accept_orders))}:{iso()}")
+            else:
+                dev = self.bridge.update_device(int(device_id), accept_orders=bool(accept_orders), idem=f"device-accept-orders:{int(device_id)}:{int(bool(accept_orders))}:{iso()}")
+        except BridgeClientError as e:
+            raise MerchantError(e.code, e.message, e.status_code)
+        with self.db.connect() as con:
+            self._log_admin_action_locked(con, admin, "device_accept_orders", "device", device_id, {"accept_orders": bool(accept_orders)})
         return dict(dev)
 
     def admin_delete_device(self, admin: dict[str, Any] | None, device_id: int) -> dict[str, Any]:

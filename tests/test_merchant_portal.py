@@ -21,7 +21,7 @@ class FakeBridge:
         self.lock = threading.Lock()
         self.idle = list(range(1, capacity + 1))
         self.devices: dict[int, dict[str, Any]] = {
-            i: {"id": i, "device_id": i, "machine_id": f"machine-{i}", "display_name": f"{i}号机", "online": True, "control_state": "idle", "agent_state": "idle", "ui_state": "idle", "mode": "machine", "enabled": True}
+            i: {"id": i, "device_id": i, "machine_id": f"machine-{i}", "display_name": f"{i}号机", "online": True, "control_state": "idle", "agent_state": "idle", "ui_state": "idle", "mode": "machine", "enabled": True, "accept_orders": True}
             for i in range(1, capacity + 1)
         }
         self.sessions: dict[str, dict[str, Any]] = {}
@@ -49,8 +49,9 @@ class FakeBridge:
 
     def get_capacity(self) -> dict[str, Any]:
         with self.lock:
-            n = len(self.idle)
-            return {"ok": True, "available": bool(n), "capacity_label": "many" if n >= 3 else ("few" if n else "full"), "idle_device_ids": list(self.idle)}
+            idle = [did for did in self.idle if self.devices.get(did, {}).get("enabled", True) and self.devices.get(did, {}).get("accept_orders", True)]
+            n = len(idle)
+            return {"ok": True, "available": bool(n), "capacity_label": "many" if n >= 3 else ("few" if n else "full"), "idle_device_ids": list(idle)}
 
     def list_devices(self) -> list[dict[str, Any]]:
         with self.lock:
@@ -62,16 +63,16 @@ class FakeBridge:
                 rows.append(item)
             return rows
 
-    def create_device(self, *, machine_id: str, display_name: str, mode: str = "machine", radar_url: str = "", watchdog_card: str = "", idem: str) -> dict[str, Any]:
+    def create_device(self, *, machine_id: str, display_name: str, mode: str = "machine", radar_url: str = "", watchdog_card: str = "", accept_orders: bool = True, idem: str) -> dict[str, Any]:
         with self.lock:
             if any(d.get("machine_id") == machine_id for d in self.devices.values()):
                 raise BridgeClientError("machine_id_exists", "机器ID已存在", 409)
             did = max(self.devices.keys(), default=0) + 1
-            dev = {"id": did, "device_id": did, "machine_id": machine_id, "display_name": display_name, "online": False, "control_state": "offline", "agent_state": "offline", "ui_state": "unknown", "mode": mode, "enabled": True, "radar_url": radar_url, "watchdog_card": watchdog_card}
+            dev = {"id": did, "device_id": did, "machine_id": machine_id, "display_name": display_name, "online": False, "control_state": "offline", "agent_state": "offline", "ui_state": "unknown", "mode": mode, "enabled": True, "accept_orders": bool(accept_orders), "radar_url": radar_url, "watchdog_card": watchdog_card}
             self.devices[did] = dev
             return dict(dev)
 
-    def update_device(self, device_id: int, *, machine_id: str | None = None, display_name: str | None = None, mode: str | None = None, radar_url: str | None = None, watchdog_card: str | None = None, enabled: bool | None = None, idem: str) -> dict[str, Any]:
+    def update_device(self, device_id: int, *, machine_id: str | None = None, display_name: str | None = None, mode: str | None = None, radar_url: str | None = None, watchdog_card: str | None = None, enabled: bool | None = None, accept_orders: bool | None = None, idem: str) -> dict[str, Any]:
         with self.lock:
             if int(device_id) not in self.devices:
                 raise BridgeClientError("not_found", "设备不存在", 404)
@@ -88,6 +89,8 @@ class FakeBridge:
                 dev["watchdog_card"] = watchdog_card
             if enabled is not None:
                 dev["enabled"] = bool(enabled)
+            if accept_orders is not None:
+                dev["accept_orders"] = bool(accept_orders)
             return dict(dev)
 
     def set_device_mode(self, device_id: int, mode: str, *, idem: str) -> dict[str, Any]:
@@ -95,6 +98,9 @@ class FakeBridge:
 
     def set_device_enabled(self, device_id: int, enabled: bool, *, idem: str) -> dict[str, Any]:
         return self.update_device(device_id, enabled=enabled, idem=idem)
+
+    def set_device_accept_orders(self, device_id: int, accept_orders: bool, *, idem: str) -> dict[str, Any]:
+        return self.update_device(device_id, accept_orders=accept_orders, idem=idem)
 
     def delete_device(self, device_id: int, *, idem: str) -> dict[str, Any]:
         with self.lock:
@@ -129,15 +135,17 @@ class FakeBridge:
                 "expected_device_state": expected_device_state,
                 "takeover_policy": takeover_policy,
             })
-            if not self.idle:
+            idle = [did for did in self.idle if self.devices.get(did, {}).get("enabled", True) and self.devices.get(did, {}).get("accept_orders", True)]
+            if not idle:
                 raise BridgeClientError("device_not_available", "没有可用设备", 409)
             if device_id is not None:
-                if int(device_id) not in self.idle:
+                if int(device_id) not in idle:
                     raise BridgeClientError("device_not_available", "没有可用设备", 409)
                 self.idle.remove(int(device_id))
                 did = int(device_id)
             else:
-                did = self.idle.pop(0)
+                did = idle[0]
+                self.idle.remove(did)
             sid = f"cs_{len(self.sessions)+1}"
             sess = {"control_session_id": sid, "device_id": did, "fencing_token": f"ft_{sid}", "status": "active", "device_epoch": 1, "merchant_context_ref": merchant_context_ref}
             self.sessions[sid] = sess
@@ -652,6 +660,30 @@ def test_admin_customer_and_order_management_surfaces(app_and_bridge):
     updated = admin_client.put(f"/api/admin/customers/{customer['id']}/balance", json={"delta_minutes": 30})
     assert updated.status_code == 200
     assert updated.json()["customer"]["balance_minutes"] == 90
+    assert updated.json()["customer"]["balance_machine_minutes"] == 90
+    assert updated.json()["customer"]["balance_absolute_minutes"] == 0
+
+    split = admin_client.put(
+        f"/api/admin/customers/{customer['id']}/balance",
+        json={
+            "balance_machine_minutes": 75,
+            "balance_machine_rounds": 2,
+            "balance_absolute_minutes": 45,
+            "balance_absolute_rounds": 3,
+        },
+    )
+    assert split.status_code == 200, split.text
+    split_customer = split.json()["customer"]
+    assert split_customer["balance_minutes"] == 120
+    assert split_customer["balance_rounds"] == 5
+    assert split_customer["balance_machine_minutes"] == 75
+    assert split_customer["balance_machine_rounds"] == 2
+    assert split_customer["balance_absolute_minutes"] == 45
+    assert split_customer["balance_absolute_rounds"] == 3
+
+    html = admin_client.get("/merchant-admin").text
+    for snippet in ["机密余额", "绝密余额", "changeMachineMinutes", "changeAbsoluteMinutes", "调余额"]:
+        assert snippet in html
 
     user_client = TestClient(app)
     assert user_client.post("/api/login", json={"username": "managed", "password": "123456"}).status_code == 200
@@ -974,6 +1006,9 @@ def test_admin_device_code_and_mode_management(app_and_bridge):
         "重启备用电脑",
         "远程更新",
         "回收日志",
+        "停止接单",
+        "恢复接单",
+        "toggleAcceptOrders",
         "禁用设备",
         "编辑设备",
         "删除设备",
@@ -1008,6 +1043,15 @@ def test_admin_device_code_and_mode_management(app_and_bridge):
     assert toggled.status_code == 200, toggled.text
     assert bridge.devices[dev["id"]]["enabled"] is False
 
+    stopped = admin.put(f"/api/admin/devices/{dev['id']}/accept-orders", json={"accept_orders": False})
+    assert stopped.status_code == 200, stopped.text
+    assert bridge.devices[dev["id"]]["accept_orders"] is False
+    assert stopped.json()["msg"] == "已停止接单"
+
+    resumed = admin.put(f"/api/admin/devices/{dev['id']}/accept-orders", json={"accept_orders": True})
+    assert resumed.status_code == 200, resumed.text
+    assert bridge.devices[dev["id"]]["accept_orders"] is True
+
     deleted = admin.delete(f"/api/admin/devices/{dev['id']}")
     assert deleted.status_code == 200, deleted.text
     assert dev["id"] not in bridge.devices
@@ -1015,6 +1059,7 @@ def test_admin_device_code_and_mode_management(app_and_bridge):
     logs = admin.get("/api/admin/audit-logs").json()["logs"]
     assert any(l["action"] == "device_create" for l in logs)
     assert any(l["action"] == "device_mode_update" for l in logs)
+    assert any(l["action"] == "device_accept_orders" for l in logs)
 
 
 def test_customer_capacity_full_and_few_match_device_status(tmp_path):
@@ -1029,6 +1074,15 @@ def test_customer_capacity_full_and_few_match_device_status(tmp_path):
     assert few["capacity"]["capacity_label"] == "few"
     assert few["capacity"]["capacity_text"] == "空闲较少"
     assert len([d for d in few["devices"] if d["work_status"] == "空闲"]) == 2
+
+    bridge.devices[1]["accept_orders"] = False
+    stopped = client.get("/api/devices/status").json()
+    assert stopped["capacity"]["capacity_label"] == "few"
+    assert stopped["capacity"]["idle_count"] == 1
+    assert stopped["capacity"]["idle_device_ids"] == [2]
+    assert stopped["capacity"]["stopped_order_count"] == 0
+    assert all(d["id"] != 1 for d in stopped["devices"])
+    bridge.devices[1]["accept_orders"] = True
 
     bridge.idle = []
     for d in bridge.devices.values():
