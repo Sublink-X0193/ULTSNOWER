@@ -2285,6 +2285,10 @@ function statusBadge(status) {
 function onlineBadge(v) { return v ? '<span class="badge badge-online">在线</span>' : '<span class="badge badge-offline">离线</span>'; }
 function fmtMin(m) { m = Number(m || 0); return m >= 60 ? `${Math.floor(m/60)}时${m%60}分` : `${m}分`; }
 function fmtDate(s) { return s ? new Date(s).toLocaleString() : '-'; }
+async function copyText(v) {
+  try { await navigator.clipboard.writeText(String(v || '')); toast('已复制'); }
+  catch(e) { window.prompt('复制下面内容', String(v || '')); }
+}
 function showTab(name) {
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === 'tab-' + name));
@@ -2465,16 +2469,64 @@ async function loadDevicesAdmin() {
   const d = await api('/api/admin/devices');
   renderDevicesAdmin(d.devices || []);
 }
-function deviceModeBadge(mode) {
-  mode = String(mode || 'machine');
+function deviceModeBadge(mode, runningMode='') {
+  mode = String(mode || 'machine'); runningMode = String(runningMode || '');
   if (mode === 'absolute') return '<span class="badge badge-absolute">绝密</span>';
-  if (mode === 'hybrid') return '<span class="badge badge-purple">混合</span>';
+  if (mode === 'hybrid') {
+    if (runningMode === 'machine') return '<span class="badge badge-purple">混合-机密</span>';
+    if (runningMode === 'absolute' || runningMode === 'secret') return '<span class="badge badge-purple">混合-绝密</span>';
+    return '<span class="badge badge-purple">混合</span>';
+  }
   return '<span class="badge badge-machine">机密</span>';
 }
+function workStatusBadge(status, cooldownMs=0) {
+  status = String(status || '未知');
+  const secLeft = cooldownMs ? Math.max(0, Math.ceil((Number(cooldownMs) - Date.now()) / 1000)) : 0;
+  const label = status === '准备中' && secLeft > 0 ? `准备中 ${secLeft}s` : status;
+  const running = ['配装中','游戏中','执行中','等待选图','等待进图','等待进图中','监控中','已准备待进图','选择干员中','地图载入中','丢包中','自雷中','观战中','已进队'];
+  if (status === '空闲') return '<span class="badge badge-online">空闲</span>';
+  if (status === '离线' || status === '不在线') return '<span class="badge badge-offline">不在线</span>';
+  if (status === '已阵亡' || status === '进队异常' || status === '进队失败') return `<span class="badge badge-failed">${esc(label)}</span>`;
+  if (status === '已结束') return `<span class="badge badge-used">${esc(label)}</span>`;
+  if (status === '准备中' || status === '等待进房' || status === '等待救援') return `<span class="badge badge-waiting">${esc(label)}</span>`;
+  if (running.includes(status)) return `<span class="badge badge-running">${esc(label)}</span>`;
+  return `<span class="badge badge-used">${esc(label)}</span>`;
+}
+function formatRemainingHm(minutes) {
+  const m = parseInt(minutes || 0);
+  const h = Math.floor(m / 60), mm = m % 60;
+  if (h > 0 && mm > 0) return `${h}时${mm}分`;
+  if (h > 0) return `${h}时`;
+  return `${mm}分`;
+}
+function parseHfbNumber(v) {
+  const s = String(v || '').replace(/[,，\s]/g, '').toUpperCase();
+  if (!s) return 0;
+  const n = parseFloat(s.replace(/[WK万M]/g, '')) || 0;
+  if (s.endsWith('M')) return n * 1000000;
+  if (s.endsWith('W') || s.endsWith('万')) return n * 10000;
+  if (s.endsWith('K')) return n * 1000;
+  return parseFloat(s) || 0;
+}
+function formatHfb(v) {
+  const raw = String(v || '');
+  const n = parseHfbNumber(raw);
+  if (!raw && !n) return {text:'--', low:false};
+  if (raw) return {text: raw, low: n > 0 && n < 500000};
+  if (n >= 10000) return {text:(n/10000).toFixed(1).replace(/\.0$/,'') + '万', low:n < 500000};
+  return {text:String(n), low:n > 0 && n < 500000};
+}
+function deviceDetailHtml(d) {
+  const detailMain = d.work_status_detail || d.sub_state || d.prison_stage_label || d.prison_stage || '';
+  if (!detailMain && !d.prison_match && !d.prison_point && !d.prison_action && !d.current_map) return '<span class="hint">--</span>';
+  const meta = [d.prison_action, d.prison_point, d.prison_match, d.prison_region, d.current_map].filter(Boolean).map(esc).join(' · ');
+  return `<div style="line-height:1.5;min-width:120px;"><span class="badge badge-purple">${esc(detailMain || '详情')}</span>${meta ? `<div class="hint" style="max-width:190px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${meta}">${meta}</div>` : ''}</div>`;
+}
 function renderDevicesAdmin(rows) {
-  if (!rows.length) { $('devicesTable').innerHTML = '<div class="empty-state">暂无设备；请先在 /setup 配置 Bridge API Key，并确认中央 Bridge 已有在线 Agent。</div>'; return; }
+  if (!rows.length) { $('devicesTable').innerHTML = '<div class="empty-state">暂无设备；请先在 /setup 配置 Bridge API Key，并确认中央 Bridge 已有 Agent 或点击添加设备。</div>'; return; }
   $('devicesTable').innerHTML = `<table class="data-table"><thead><tr>
-    <th>设备</th><th>模式/启用</th><th>在线</th><th>控制状态</th><th>Agent/UI</th><th>当前订单</th><th>操作</th>
+    <th>ID</th><th>名称/设备码</th><th>模式</th><th>在线</th><th>工作状态</th><th>详情</th>
+    <th>上机用户</th><th>剩余时长</th><th>预计结束</th><th>哈币</th><th>老板ID</th><th>已打局</th><th>已打币</th><th>版本</th><th>启用</th><th>操作</th>
   </tr></thead><tbody>` + rows.map(d => {
     const o = d.active_order;
     const devName = d.device_name || (d.id + '号机');
@@ -2485,33 +2537,66 @@ function renderDevicesAdmin(rows) {
     const encWatchdog = encodeURIComponent(d.watchdog_card || '');
     const mode = d.mode || d.device_mode || 'machine';
     const nextMode = mode === 'machine' ? 'hybrid' : (mode === 'hybrid' ? 'absolute' : 'machine');
+    const shortKey = devKey ? (devKey.length > 16 ? devKey.slice(0, 12) + '...' : devKey) : '未绑定机器ID';
+    const status = d.work_status || (d.online ? ((o || d.running_order_id) ? '执行中' : '空闲') : '离线');
+    const runUser = d.running_user || d.active_customer || (o ? (o.customer_username || o.customer_id) : '');
+    const runBoss = d.running_boss_name || d.team_code || (o ? o.team_code : '');
+    const userHtml = runUser ? `<span class="badge badge-running">${esc(runUser === 'admin' ? ((runBoss || '手动') + '-手动') : runUser)}</span>${runBoss ? `<div class="hint">组队码：${esc(runBoss)}</div>` : ''}` : '<span class="hint">--</span>';
+    const rem = Number(d.remaining_minutes || (o ? o.remaining_minutes : 0) || 0);
+    const hfb = formatHfb(d.harvard || d.hfb_value || '');
+    const bossId = d.spectate_boss || d.boss_id || '--';
+    const roundText = `${Number(d.round_count || 0)}${Number(d.max_rounds || 0) > 0 ? '/' + Number(d.max_rounds || 0) : '/无限制'}`;
+    let coinText = '--';
+    if (d.running_order_id || o) {
+      const currentCoins = parseHfbNumber(d.harvard || d.hfb_value || '');
+      const startCoins = Number(d.start_coins || 0);
+      const coinLoss = startCoins > 0 && currentCoins > 0 ? Math.max(0, (startCoins - currentCoins) / 10000) : Number(d.actual_coin_loss || 0);
+      const limit = Number(d.max_coin_loss || 0) > 0 ? Number(d.max_coin_loss || 0) + '万' : '无限制';
+      coinText = `${coinLoss ? coinLoss.toFixed(1) : '0.0'}万/${limit}`;
+    }
+    const canManual = d.online && d.enabled !== false && status === '空闲' && !(o || d.running_order_id);
+    let actionBtns = '';
+    if (canManual) actionBtns += `<button class="btn-sm btn-green" onclick="openManualOrder(${d.id}, decodeURIComponent('${encName}'), '${esc(mode)}')">手动下单</button>`;
+    if (o) {
+      const oid = o.id;
+      actionBtns += `<button class="btn-sm btn-purple" onclick="openAdminRejoin(${oid}, decodeURIComponent('${encodeURIComponent(runBoss || '')}'))">换队</button>`;
+      actionBtns += `<button class="btn-sm btn-primary" onclick="adjustOrder(${oid})">加减时</button>`;
+      actionBtns += `<button class="btn-sm btn-danger" onclick="stopOrder(${oid})">结束</button>`;
+      actionBtns += `<button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'ready')">准备</button>`;
+      actionBtns += `<button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'watch')">观战</button>`;
+      actionBtns += `<button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'switch_spectate')">切观战</button>`;
+      actionBtns += `<button class="btn-sm btn-amber" onclick="sendDeviceCommand(${d.id}, 'restart_backup')">重启备用</button>`;
+      actionBtns += `<button class="btn-sm btn-purple" onclick="sendDeviceCommand(${d.id}, 'cleanup')">清理</button>`;
+    }
+    if (d.radar_url) actionBtns += `<button class="btn-sm btn-gray" onclick="copyText(decodeURIComponent('${encRadar}'))">📋 网址</button>`;
+    actionBtns += `<button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'restart')">异常重启</button>`;
+    actionBtns += `<button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'update')">远程更新</button>`;
+    actionBtns += `<button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'collect_log')">回收日志</button>`;
+    actionBtns += `<button class="btn-sm btn-purple" onclick="switchMode(${d.id}, '${esc(nextMode)}')">切为${nextMode === 'machine' ? '机密' : (nextMode === 'hybrid' ? '混合' : '绝密')}</button>`;
+    actionBtns += `<button class="btn-sm ${d.enabled === false ? 'btn-green' : 'btn-amber'}" onclick="toggleDevice(${d.id}, ${d.enabled === false ? 1 : 0})">${d.enabled === false ? '启用' : '禁用'}</button>`;
+    actionBtns += `<button class="btn-sm btn-primary" onclick="editDevice(${d.id}, decodeURIComponent('${encName}'), decodeURIComponent('${encKey}'), '${esc(mode)}', decodeURIComponent('${encRadar}'), decodeURIComponent('${encWatchdog}'))">编辑</button>`;
+    if (!o) actionBtns += `<button class="btn-sm btn-danger" onclick="deleteDevice(${d.id})">删除</button>`;
     return `<tr>
-      <td><b>${esc(devName)}</b><br><span class="hint">#${esc(d.id)} · ${esc(devKey || '未绑定机器ID')}</span></td>
-      <td>${deviceModeBadge(mode)}<br>${d.enabled === false ? '<span class="badge badge-offline">禁用</span>' : '<span class="badge badge-online">启用</span>'}</td>
+      <td>${esc(d.id)}</td>
+      <td><b>${esc(devName)}</b><div class="hint" style="font-family:monospace">${esc(shortKey)}</div></td>
+      <td>${deviceModeBadge(mode, d.running_mode)}</td>
       <td>${onlineBadge(d.online)}</td>
-      <td>${statusBadge(d.control_state || '-')}</td>
-      <td>${esc(d.agent_state || '-')}<br><span class="hint">${esc(d.ui_state || '')}</span></td>
-      <td>${o ? `${statusBadge(o.status)}<br>${esc(o.customer_username || d.active_customer || '-') } / 剩 ${fmtMin(o.remaining_minutes)}` : '-'}</td>
-      <td>
-        <button class="btn-sm btn-primary" onclick="editDevice(${d.id}, decodeURIComponent('${encName}'), decodeURIComponent('${encKey}'), '${esc(mode)}', decodeURIComponent('${encRadar}'), decodeURIComponent('${encWatchdog}'))">编辑</button>
-        <button class="btn-sm btn-purple" onclick="switchMode(${d.id}, '${esc(nextMode)}')">切换模式</button>
-        <button class="btn-sm ${d.enabled === false ? 'btn-green' : 'btn-amber'}" onclick="toggleDevice(${d.id}, ${d.enabled === false ? 1 : 0})">${d.enabled === false ? '启用' : '禁用'}</button>
-        ${!o ? `<button class="btn-sm btn-green" onclick="openManualOrder(${d.id}, decodeURIComponent('${encName}'), '${esc(mode)}')">手动下单</button>
-               <button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'restart')">异常重启</button>
-               <button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'update')">更新脚本</button>
-               <button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'collect_log')">回收日志</button>
-               <button class="btn-sm btn-danger" onclick="deleteDevice(${d.id})">删除</button>` : ''}
-        ${o ? `<button class="btn-sm btn-primary" onclick="openAdminRejoin(${o.id}, decodeURIComponent('${encodeURIComponent(o.team_code || '')}'))">换队</button>
-               <button class="btn-sm btn-danger" onclick="sendDeviceCommand(${d.id}, 'stop_current')">停止</button>
-               <button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'ready')">准备</button>
-               <button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'watch')">观战</button>
-               <button class="btn-sm btn-gray" onclick="sendDeviceCommand(${d.id}, 'switch_spectate')">切观战</button>
-               <button class="btn-sm btn-amber" onclick="sendDeviceCommand(${d.id}, 'restart_backup')">重启备用</button>
-               <button class="btn-sm btn-purple" onclick="sendDeviceCommand(${d.id}, 'cleanup')">清理</button>` : ''}
-      </td>
+      <td>${workStatusBadge(status, d.cooldown_until_ms || 0)}</td>
+      <td>${deviceDetailHtml(d)}</td>
+      <td>${userHtml}</td>
+      <td>${(runUser || o || d.running_order_id) ? `<b>${rem}</b> 分钟<div class="hint">${formatRemainingHm(rem)}</div>` : '--'}</td>
+      <td><span class="hint">${esc(d.estimated_end || (o ? o.end_at : '') || '--')}</span></td>
+      <td>${hfb.text === '--' ? '--' : `<span${hfb.low ? ' style="color:#dc2626;font-weight:bold;"' : ''} title="原始值: ${esc(d.harvard || d.hfb_value || '')}">${esc(hfb.text)}</span>`}</td>
+      <td style="font-family:monospace"><b>${esc(bossId)}</b></td>
+      <td>${esc(roundText)}</td>
+      <td>${esc(coinText)}</td>
+      <td><span class="hint">${esc(d.script_ver || '--')}</span></td>
+      <td>${d.enabled === false ? '<span class="badge badge-offline">禁用</span>' : '<span class="badge badge-online">启用</span>'}</td>
+      <td style="display:flex;gap:4px;flex-wrap:wrap;min-width:260px;">${actionBtns}</td>
     </tr>`;
   }).join('') + '</tbody></table>';
 }
+async function loadDevices(forceRefresh=false) { await loadDevicesAdmin(); }
 function openAddDeviceModal() {
   $('editDeviceId').value = '';
   $('deviceName').value = '';

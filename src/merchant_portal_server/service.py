@@ -947,6 +947,122 @@ class MerchantService:
             (int(device_id), int(device_id), *sorted(ACTIVE_ORDER_STATUSES)),
         ).fetchone()
 
+    @staticmethod
+    def _to_int(value: Any, default: int = 0) -> int:
+        try:
+            if value in (None, ""):
+                return default
+            return int(float(value))
+        except Exception:
+            return default
+
+    @staticmethod
+    def _frontend_work_status(raw: Any) -> str:
+        status = str(raw or "").strip()
+        mapping = {
+            "": "空闲",
+            "idle": "空闲",
+            "free": "空闲",
+            "offline": "离线",
+            "disconnected": "离线",
+            "lost": "离线",
+            "running": "执行中",
+            "busy": "执行中",
+            "active": "执行中",
+            "claimed": "已占用",
+            "commanding": "执行中",
+            "team_entered": "已进队",
+            "team": "已进队",
+            "watching": "观战中",
+        }
+        return mapping.get(status, status)
+
+    @staticmethod
+    def _runtime_from_device(device: dict[str, Any]) -> dict[str, Any]:
+        runtime = device.get("runtime") if isinstance(device.get("runtime"), dict) else {}
+        merged = {**runtime, **{k: v for k, v in device.items() if v is not None}}
+        return merged
+
+    def _normalize_admin_device_row(self, d: dict[str, Any], active: dict[str, Any] | None) -> dict[str, Any]:
+        runtime = self._runtime_from_device(d)
+        did = int(d.get("id") or d.get("device_id") or 0)
+        online = bool(d.get("online", True))
+        mode = d.get("mode") or d.get("device_mode") or "machine"
+        active_view = self._admin_order_view(active) if active else None
+        raw_status = runtime.get("work_status") or runtime.get("state") or runtime.get("agent_state") or d.get("control_state") or "idle"
+        work_status = self._frontend_work_status(raw_status)
+        if not online:
+            work_status = "离线"
+        elif active and work_status in {"空闲", "离线", "已结束"}:
+            work_status = "执行中"
+        running_user = runtime.get("running_user") or (active.get("customer_username") if active else "")
+        running_boss = runtime.get("running_boss_name") or runtime.get("boss_name") or runtime.get("team_code") or (active.get("team_code") if active else "")
+        remaining_minutes = self._to_int(runtime.get("remaining_minutes"), 0)
+        if active_view:
+            remaining_minutes = int(active_view.get("remaining_minutes") or remaining_minutes or 0)
+        boss_id = runtime.get("spectate_boss") or runtime.get("boss_id") or ""
+        harvard = runtime.get("harvard") or runtime.get("hfb") or runtime.get("currency_balance") or runtime.get("hfb_value") or ""
+        return {
+            **d,
+            "id": did,
+            "device_id": did,
+            "device_key": d.get("machine_id") or d.get("device_key") or d.get("machine") or str(did),
+            "machine_id": d.get("machine_id") or d.get("device_key") or "",
+            "device_name": d.get("display_name") or d.get("device_name") or f"{did}号机",
+            "mode": mode,
+            "device_mode": mode,
+            "enabled": bool(d.get("enabled", True)),
+            "radar_url": d.get("radar_url") or runtime.get("radar_url") or "",
+            "watchdog_card": d.get("watchdog_card") or runtime.get("watchdog_card") or "",
+            "watchdog": runtime.get("watchdog") or {},
+            "online": online,
+            "control_state": (active.get("status") if active else None) or d.get("control_state") or d.get("state") or "idle",
+            "agent_state": d.get("agent_state") or runtime.get("agent_state") or d.get("ui_state") or "",
+            "ui_state": d.get("ui_state") or runtime.get("ui_state") or "",
+            "active_order": active_view,
+            "active_customer": active.get("customer_username") if active else "",
+            "running_order_id": (active.get("id") if active else None) or self._to_int(runtime.get("running_order_id"), 0) or None,
+            "running_user": running_user or "",
+            "running_user_id": runtime.get("running_user_id") or (active.get("customer_id") if active else None),
+            "running_boss_name": running_boss or "",
+            "team_code": runtime.get("team_code") or running_boss or "",
+            "boss_name": runtime.get("boss_name") or running_boss or "",
+            "running_mode": runtime.get("running_mode") or (active.get("quality") if active else "") or "",
+            "work_status": work_status,
+            "work_status_detail": runtime.get("work_status_detail") or runtime.get("sub_state") or "",
+            "sub_state": runtime.get("sub_state") or "",
+            "remaining_minutes": remaining_minutes,
+            "remaining_seconds": self._to_int(runtime.get("remaining_seconds"), remaining_minutes * 60),
+            "end_time": runtime.get("end_time") or (active.get("end_at") if active else None),
+            "end_time_ms": self._to_int(runtime.get("end_time_ms"), 0),
+            "estimated_end": runtime.get("estimated_end") or (active.get("end_at") if active else "") or "",
+            "cooldown_until_ms": self._to_int(runtime.get("cooldown_until_ms"), 0),
+            "harvard": str(harvard or ""),
+            "hfb_value": self._to_int(runtime.get("hfb_value") or runtime.get("currency_balance"), 0),
+            "spectate_boss": str(boss_id or ""),
+            "boss_id": str(boss_id or ""),
+            "boss_id_debug": runtime.get("boss_id_debug") or "",
+            "round_count": self._to_int(runtime.get("round_count"), 0),
+            "run_rounds": self._to_int(runtime.get("run_rounds"), 0),
+            "max_rounds": self._to_int(runtime.get("max_rounds") or (active.get("requested_rounds") if active else 0), 0),
+            "start_coins": self._to_int(runtime.get("start_coins"), 0),
+            "max_coin_loss": self._to_int(runtime.get("max_coin_loss"), 0),
+            "actual_coin_loss": self._to_int(runtime.get("actual_coin_loss") or runtime.get("coin_loss"), 0),
+            "script_ver": runtime.get("script_ver") or "",
+            "updating": bool(runtime.get("updating")),
+            "current_map": runtime.get("current_map") or "",
+            "in_game": bool(runtime.get("in_game")),
+            "last_heartbeat_at": d.get("last_heartbeat_at") or runtime.get("last_heartbeat_at") or "",
+            "heartbeat_age_seconds": runtime.get("heartbeat_age_seconds"),
+            "prison_stage": runtime.get("prison_stage") or "",
+            "prison_stage_label": runtime.get("prison_stage_label") or "",
+            "prison_point": runtime.get("prison_point") or "",
+            "prison_action": runtime.get("prison_action") or "",
+            "prison_score": runtime.get("prison_score"),
+            "prison_match": runtime.get("prison_match") or "",
+            "prison_region": runtime.get("prison_region") or "",
+        }
+
     def admin_list_devices(self) -> list[dict[str, Any]]:
         bridge_devices: list[dict[str, Any]] = []
         if hasattr(self.bridge, "list_devices"):
@@ -985,30 +1101,11 @@ class MerchantService:
                 continue
             seen.add(did)
             active = active_by_device.get(did)
-            item = {
-                **d,
-                "id": did,
-                "device_id": did,
-                "device_key": d.get("machine_id") or d.get("device_key") or d.get("machine") or str(did),
-                "machine_id": d.get("machine_id") or d.get("device_key") or "",
-                "device_name": d.get("display_name") or d.get("device_name") or f"{did}号机",
-                "mode": d.get("mode") or d.get("device_mode") or "machine",
-                "device_mode": d.get("mode") or d.get("device_mode") or "machine",
-                "enabled": bool(d.get("enabled", True)),
-                "radar_url": d.get("radar_url") or "",
-                "watchdog_card": d.get("watchdog_card") or "",
-                "online": bool(d.get("online", True)),
-                "control_state": (active.get("status") if active else None) or d.get("control_state") or d.get("state") or "idle",
-                "agent_state": d.get("agent_state") or d.get("ui_state") or "",
-                "ui_state": d.get("ui_state") or "",
-                "active_order": self._admin_order_view(active) if active else None,
-                "active_customer": active.get("customer_username") if active else "",
-            }
-            out.append(item)
+            out.append(self._normalize_admin_device_row(d, active))
         for did, active in active_by_device.items():
             if did in seen:
                 continue
-            out.append({
+            out.append(self._normalize_admin_device_row({
                 "id": did,
                 "device_id": did,
                 "device_name": f"{did}号机",
@@ -1016,9 +1113,7 @@ class MerchantService:
                 "control_state": "busy",
                 "agent_state": "",
                 "ui_state": "",
-                "active_order": self._admin_order_view(active),
-                "active_customer": active.get("customer_username") or "",
-            })
+            }, active))
         out.sort(key=lambda x: int(x.get("id") or 0))
         return out
 

@@ -399,3 +399,9 @@ python -m pytest -q
 - 恢复前自动创建 `merchant_pre_restore_*.sqlite` 备份。
 - 备份文件名使用 `Path.name` 收敛，拒绝路径穿越。
 - 备份创建审计先写入数据库，再执行 SQLite backup，使备份文件自身包含创建审计记录。
+
+### 10.3 设备直控旧版字段恢复
+
+- 商户后台“设备直控”表已按旧版列恢复：ID、名称/设备码、模式、在线、工作状态、详情、上机用户、剩余时长、预计结束、哈币、老板ID、已打局、已打币、版本、启用、操作。
+- 中央 Bridge 新增 `devices.runtime_json`，Agent 心跳会上报并保存旧版运行态字段：`work_status`、`spectate_boss/boss_id`、`harvard/hfb_value`、局数、币损、脚本版本、地图和监狱路线详情。
+- 商户服务器通过 API Key 读取 Bridge 设备后复用这些运行态字段，不再重新设计一套单薄状态表。

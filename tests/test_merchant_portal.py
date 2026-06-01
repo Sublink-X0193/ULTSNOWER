@@ -956,7 +956,7 @@ def test_admin_device_code_and_mode_management(app_and_bridge):
     admin = TestClient(app)
     assert admin.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
     html = admin.get("/merchant-admin").text
-    for snippet in ["openAddDeviceModal", "submitDevice", "switchMode", "toggleDevice", "机器ID / 设备码"]:
+    for snippet in ["openAddDeviceModal", "submitDevice", "switchMode", "toggleDevice", "机器ID / 设备码", "老板ID", "哈币", "已打局", "已打币"]:
         assert snippet in html
 
     created = admin.post("/api/admin/devices", json={"device_name": "新设备", "device_key": "new-machine-code", "mode": "hybrid", "radar_url": "https://radar.local/x", "watchdog_card": "wd-1"})
@@ -985,6 +985,35 @@ def test_admin_device_code_and_mode_management(app_and_bridge):
     logs = admin.get("/api/admin/audit-logs").json()["logs"]
     assert any(l["action"] == "device_create" for l in logs)
     assert any(l["action"] == "device_mode_update" for l in logs)
+
+
+def test_admin_devices_reuse_legacy_runtime_fields(app_and_bridge):
+    app, bridge = app_and_bridge
+    bridge.devices[1].update(
+        {
+            "online": True,
+            "control_state": "idle",
+            "agent_state": "已进队",
+            "ui_state": "team",
+            "runtime": {
+                "work_status": "已进队",
+                "spectate_boss": "BOSS7788",
+                "harvard": "88.5W",
+                "round_count": 2,
+                "max_rounds": 5,
+                "script_ver": "v9.1",
+                "work_status_detail": "等待观战确认",
+            },
+        }
+    )
+    admin = TestClient(app)
+    assert admin.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+    data = admin.get("/api/admin/devices").json()["devices"]
+    row = next(d for d in data if d["id"] == 1)
+    assert row["work_status"] == "已进队"
+    assert row["spectate_boss"] == "BOSS7788"
+    assert row["harvard"] == "88.5W"
+    assert row["round_count"] == 2
 
 
 def test_admin_manual_order_infers_device_mode_like_legacy_payload(tmp_path):
