@@ -473,6 +473,7 @@ Bridge 不做强 schema 校验，Agent 根据 action 执行。当前商户端约
 | `set_loadout` | 设置配置/配装 | `quality`, `loadout_id`, `loadout_type`, `items`, `total_cost` |
 | `enter_team` | 进队/换队 | `team_code`, `clear_existing`, `operator` |
 | `rejoin` | 换队别名 | `team_code` |
+| `switch_spectate` | 切换观察/老板 ID | `operator`, `boss_id` |
 | `ready` | 准备 | `{}` |
 | `watch` | 开始观察 | `ace_enabled`, `ace_window_seconds`, `max_rounds`, `max_coin_loss_w` |
 | `stop_current` | 结束当前订单/清理 | `reason`, `cleanup` |

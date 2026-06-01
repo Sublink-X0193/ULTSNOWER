@@ -83,3 +83,4 @@ BODY_SHA256
 
 完整接口表、请求/响应字段、事件、状态机见：[docs/CENTRAL_BRIDGE_API.md](CENTRAL_BRIDGE_API.md)。
 
+中央 Bridge 与原版中央操作台的接口差异/缺口见：[docs/CENTRAL_BRIDGE_GAP_ANALYSIS.md](CENTRAL_BRIDGE_GAP_ANALYSIS.md)。
