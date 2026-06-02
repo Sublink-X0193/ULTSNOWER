@@ -18,12 +18,18 @@ $env:MERCHANT_DB_PATH = "data\merchant.sqlite"
 $env:BRIDGE_BASE_URL = "http://127.0.0.1:8010"
 $env:BRIDGE_MERCHANT_KEY = "mk_test"
 $env:BRIDGE_MERCHANT_SECRET = "secret"
+$env:BRIDGE_API_PREFIX = "/api/external/v1"
+$env:BRIDGE_AUTH_HEADER_PREFIX = "External"
 $env:MERCHANT_ADMIN_USERNAME = "admin"
 $env:MERCHANT_ADMIN_PASSWORD = "admin123456"
 python -m merchant_portal_server
 ```
 
 默认监听 `127.0.0.1:8020`。
+
+> 对接当前 `SNOWSERVER` 精简中央服务端时使用默认 `/api/external/v1` +
+> `X-External-*`。若仍联调旧独立 `SNOW_DEVICE_CONTROL_BRIDGE`，可改为
+> `BRIDGE_API_PREFIX=/api/merchant/v1`、`BRIDGE_AUTH_HEADER_PREFIX=Merchant`。
 
 ## 本地联调快速启动
 
@@ -85,6 +91,7 @@ python -m pytest -q
   - 所有客户预览：创建客户、搜索客户、冻结/解冻、改密码、调分钟/局数余额。
   - 订单管理：订单列表、剩余时长显示、订单加减时、后台停止订单。
   - 系统设置：公告、隐私模式、维护模式。
+  - 设备管理：对接中央 `/api/external/v1/devices` 新增/编辑/启用/停用/删除接口；活动会话存在时默认不强制覆盖。
 - `GET /api/public/settings` 客户侧读取维护/公告/隐私状态。
 - `POST /api/admin/login`、`GET/PUT /api/admin/settings` 商户后台 JSON API。
 - `GET /api/admin/customers?online_only=true` 在线客户。

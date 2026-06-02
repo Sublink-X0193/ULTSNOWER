@@ -84,6 +84,19 @@ class MerchantService:
         self.session_ttl_seconds = session_ttl_seconds
 
     # ---------- utility ----------
+    def _bridge_error_message(self, e: BridgeClientError) -> str:
+        """Translate central coordination errors into operator-safe merchant prompts."""
+        if e.code in {"device_has_active_external_session", "device_has_active_control_session"}:
+            return "中央提示该设备存在活动外部控制会话。请先等待订单结束/释放会话；如需强制维护，请在中央控制台使用 force=true。"
+        if e.code == "idempotency_conflict":
+            return "中央 Bridge 幂等键冲突：同一 X-Idempotency-Key 已用于不同请求。请刷新状态后重试，不要复用该幂等键提交不同内容。"
+        if e.code == "idempotency_in_progress":
+            return "中央 Bridge 正在处理相同幂等请求，请稍后用同一操作重试。"
+        return e.message
+
+    def _raise_bridge_error(self, e: BridgeClientError) -> None:
+        raise MerchantError(e.code, self._bridge_error_message(e), e.status_code)
+
     def _get_state(self, con: sqlite3.Connection, key: str, default: str = "") -> str:
         row = con.execute("SELECT value FROM app_state WHERE key=?", (key,)).fetchone()
         return str(row["value"]) if row else default
@@ -288,6 +301,8 @@ class MerchantService:
             "bridge_base_url": base_url,
             "bridge_merchant_key": merchant_key,
             "bridge_merchant_secret_set": bool(secret),
+            "bridge_api_prefix": str(getattr(self.bridge, "api_prefix", "") or ""),
+            "bridge_auth_header_prefix": str(getattr(self.bridge, "auth_header_prefix", "") or ""),
             "system_name": settings.get("system_name") or "SNOW 自助下单",
         }
 
@@ -1064,7 +1079,7 @@ class MerchantService:
             try:
                 self.bridge.queue_stop(row["control_session_id"], fencing_token=row["fencing_token"], idem=f"admin-stop:{row['local_order_no']}:v1", reason="merchant_admin_stop")
             except BridgeClientError as e:
-                raise MerchantError(e.code, e.message, e.status_code)
+                self._raise_bridge_error(e)
         with self.db.connect() as con:
             con.execute("UPDATE local_orders SET status='stopping',fail_reason='admin_stop',updated_at=? WHERE id=?", (iso(), order_id))
         return self.admin_get_order(order_id)
@@ -1295,7 +1310,7 @@ class MerchantService:
         try:
             dev = self.bridge.create_device(machine_id=device_key, display_name=device_name, mode=mode, radar_url=str(radar_url or "").strip(), watchdog_card=str(watchdog_card or "").strip(), accept_orders=bool(accept_orders), idem=f"device-create:{device_key}:{iso()}")
         except BridgeClientError as e:
-            raise MerchantError(e.code, e.message, e.status_code)
+            self._raise_bridge_error(e)
         with self.db.connect() as con:
             self._log_admin_action_locked(con, admin, "device_create", "device", dev.get("id") or device_key, {"device_key": device_key, "device_name": device_name, "mode": mode})
         return dict(dev)
@@ -1321,7 +1336,7 @@ class MerchantService:
         try:
             dev = self.bridge.update_device(int(device_id), **kwargs, idem=f"device-update:{int(device_id)}:{iso()}")
         except BridgeClientError as e:
-            raise MerchantError(e.code, e.message, e.status_code)
+            self._raise_bridge_error(e)
         with self.db.connect() as con:
             self._log_admin_action_locked(con, admin, "device_update", "device", device_id, kwargs)
         return dict(dev)
@@ -1333,7 +1348,7 @@ class MerchantService:
         try:
             dev = self.bridge.set_device_mode(int(device_id), mode, idem=f"device-mode:{int(device_id)}:{mode}:{iso()}")
         except BridgeClientError as e:
-            raise MerchantError(e.code, e.message, e.status_code)
+            self._raise_bridge_error(e)
         with self.db.connect() as con:
             self._log_admin_action_locked(con, admin, "device_mode_update", "device", device_id, {"mode": mode})
         return dict(dev)
@@ -1344,7 +1359,7 @@ class MerchantService:
         try:
             dev = self.bridge.set_device_enabled(int(device_id), bool(enabled), idem=f"device-toggle:{int(device_id)}:{int(bool(enabled))}:{iso()}")
         except BridgeClientError as e:
-            raise MerchantError(e.code, e.message, e.status_code)
+            self._raise_bridge_error(e)
         with self.db.connect() as con:
             self._log_admin_action_locked(con, admin, "device_toggle", "device", device_id, {"enabled": bool(enabled)})
         return dict(dev)
@@ -1358,7 +1373,7 @@ class MerchantService:
             else:
                 dev = self.bridge.update_device(int(device_id), accept_orders=bool(accept_orders), idem=f"device-accept-orders:{int(device_id)}:{int(bool(accept_orders))}:{iso()}")
         except BridgeClientError as e:
-            raise MerchantError(e.code, e.message, e.status_code)
+            self._raise_bridge_error(e)
         with self.db.connect() as con:
             self._log_admin_action_locked(con, admin, "device_accept_orders", "device", device_id, {"accept_orders": bool(accept_orders)})
         return dict(dev)
@@ -1369,7 +1384,7 @@ class MerchantService:
         try:
             res = self.bridge.delete_device(int(device_id), idem=f"device-delete:{int(device_id)}:{iso()}")
         except BridgeClientError as e:
-            raise MerchantError(e.code, e.message, e.status_code)
+            self._raise_bridge_error(e)
         res = {k: v for k, v in dict(res).items() if k not in {"ok", "msg"}}
         with self.db.connect() as con:
             self._log_admin_action_locked(con, admin, "device_delete", "device", device_id, {})
@@ -1501,11 +1516,12 @@ class MerchantService:
         except BridgeClientError as e:
             with self.db.connect() as con:
                 con.execute("BEGIN IMMEDIATE")
-                con.execute("UPDATE local_orders SET status='failed',fail_reason=?,finished_at=?,updated_at=? WHERE id=?", (f"bridge:{e.code}:{e.message}"[:500], iso(), iso(), order_id))
-                self._log_admin_action_locked(con, admin, "manual_order_failed", "device", device_id, {"order_id": order_id, "error": e.code, "message": e.message})
+                msg = self._bridge_error_message(e)
+                con.execute("UPDATE local_orders SET status='failed',fail_reason=?,finished_at=?,updated_at=? WHERE id=?", (f"bridge:{e.code}:{msg}"[:500], iso(), iso(), order_id))
+                self._log_admin_action_locked(con, admin, "manual_order_failed", "device", device_id, {"order_id": order_id, "error": e.code, "message": msg})
                 con.commit()
             self._record_order_activity(order_id, event_type="admin_manual_order")
-            raise MerchantError(e.code, e.message, e.status_code)
+            self._raise_bridge_error(e)
 
     def admin_rejoin_order(self, admin: dict[str, Any] | None, order_id: int, team_code: str) -> dict[str, Any]:
         team_code = str(team_code or "").strip().upper()
@@ -1533,7 +1549,7 @@ class MerchantService:
                     idem=f"admin-rejoin:{row['local_order_no']}:{team_code}",
                 )
             except BridgeClientError as e:
-                raise MerchantError(e.code, e.message, e.status_code)
+                self._raise_bridge_error(e)
         if team_code:
             with self.db.connect() as con:
                 con.execute("BEGIN IMMEDIATE")
@@ -1600,7 +1616,7 @@ class MerchantService:
                 con.commit()
             return {"command": cmd, "order": self.admin_get_order(int(row["id"]))}
         except BridgeClientError as e:
-            raise MerchantError(e.code, e.message, e.status_code)
+            self._raise_bridge_error(e)
 
     def assert_customer_order(self, order_id: int, customer_id: int) -> dict[str, Any]:
         with self.db.connect() as con:
@@ -1626,7 +1642,7 @@ class MerchantService:
             try:
                 self.bridge.queue_stop(row["control_session_id"], fencing_token=row["fencing_token"], idem=f"customer-stop:{row['local_order_no']}:v1", reason="merchant_customer_stop")
             except BridgeClientError as e:
-                raise MerchantError(e.code, e.message, e.status_code)
+                self._raise_bridge_error(e)
 
         order_dict = dict(row)
         refund_minutes = self._remaining_minutes(order_dict)
@@ -1701,7 +1717,7 @@ class MerchantService:
                     idem=f"customer-rejoin:{row['local_order_no']}:{team_code}",
                 )
             except BridgeClientError as e:
-                raise MerchantError(e.code, e.message, e.status_code)
+                self._raise_bridge_error(e)
         if team_code:
             with self.db.connect() as con:
                 con.execute("UPDATE local_orders SET team_code=?,updated_at=? WHERE id=?", (team_code, iso(), order_id))
@@ -2533,7 +2549,7 @@ class MerchantService:
                 self._record_order_activity(order_id)
                 return result
         except BridgeClientError as e:
-            self._fail_and_refund_new_order(order_id, f"bridge:{e.code}:{e.message}")
+            self._fail_and_refund_new_order(order_id, f"bridge:{e.code}:{self._bridge_error_message(e)}")
             with self.db.connect() as con:
                 result = {"order": self._order_with_binding(con, order_id), "reused": False}
                 if idempotency_key:
@@ -2611,7 +2627,7 @@ class MerchantService:
         event_seq = int(ev.get("event_seq") or ev.get("seq") or 0)
         device_epoch = ev.get("device_epoch")
         device_epoch_i = int(device_epoch) if device_epoch is not None else None
-        control_session_id = ev.get("control_session_id")
+        control_session_id = ev.get("control_session_id") or ev.get("session_id")
         command_id = ev.get("command_id")
         device_id = ev.get("device_id")
 
@@ -2653,27 +2669,77 @@ class MerchantService:
                 con.rollback()
                 raise
 
+    def _start_ready_timer_locked(self, con: sqlite3.Connection, order: dict[str, Any], binding: dict[str, Any]) -> None:
+        order_id = int(order["id"])
+        now_s = iso()
+        if order["status"] in {"waiting_ready_timer", "commanding", "device_claimed", "claiming_device"} and not order.get("started_at"):
+            start = utcnow()
+            end = start + timedelta(minutes=int(order["requested_minutes"] or 0))
+            con.execute(
+                "UPDATE local_orders SET status='running',started_at=?,end_at=?,updated_at=? WHERE id=?",
+                (iso(start), iso(end), now_s, order_id),
+            )
+            con.execute("UPDATE order_control_bindings SET ready_timer_received=1,updated_at=? WHERE id=?", (now_s, int(binding["id"])))
+
+    def _command_action_for_event_locked(self, con: sqlite3.Connection, command_id: str | None, payload: dict[str, Any]) -> str:
+        for src in (payload, payload.get("result") if isinstance(payload.get("result"), dict) else None):
+            if isinstance(src, dict):
+                action = src.get("action") or src.get("command_action")
+                if action:
+                    return str(action)
+        if command_id:
+            row = con.execute(
+                """SELECT payload_json FROM bridge_events
+                   WHERE command_id=? AND event='command.queued'
+                   ORDER BY event_seq DESC, received_at DESC LIMIT 1""",
+                (command_id,),
+            ).fetchone()
+            if row:
+                queued = loads(row["payload_json"], {}) or {}
+                action = queued.get("action")
+                if action:
+                    return str(action)
+        return ""
+
     def _apply_event_locked(self, con: sqlite3.Connection, order: dict[str, Any], binding: dict[str, Any], event_name: str, payload: dict[str, Any], command_id: str | None, device_epoch: int | None) -> None:
         order_id = int(order["id"])
         now_s = iso()
         if event_name == "device.ready_for_customer_timer":
-            if order["status"] in {"waiting_ready_timer", "commanding", "device_claimed", "claiming_device"} and not order.get("started_at"):
-                start = utcnow()
-                end = start + timedelta(minutes=int(order["requested_minutes"] or 0))
-                con.execute(
-                    "UPDATE local_orders SET status='running',started_at=?,end_at=?,updated_at=? WHERE id=?",
-                    (iso(start), iso(end), now_s, order_id),
-                )
-                con.execute("UPDATE order_control_bindings SET ready_timer_received=1,updated_at=? WHERE id=?", (now_s, int(binding["id"])))
+            self._start_ready_timer_locked(con, order, binding)
             return
 
-        if event_name == "command.succeeded" and payload.get("action") == "stop_current":
+        action = self._command_action_for_event_locked(con, command_id, payload)
+
+        if event_name == "agent_job.done":
+            # SNOWSERVER slim external API emits agent_job.done instead of the
+            # older command.succeeded / device.ready_for_customer_timer events.
+            # The last command in our start bundle is watch; once it is done the
+            # customer timer can safely start.
+            if action == "stop_current":
+                if order["status"] in ACTIVE_ORDER_STATUSES | {"interrupted_by_disconnect", "interrupted_by_admin"}:
+                    con.execute("UPDATE local_orders SET status='finished',finished_at=?,updated_at=? WHERE id=?", (now_s, now_s, order_id))
+                    con.execute("UPDATE order_control_bindings SET status='released',last_command_id=COALESCE(?,last_command_id),updated_at=? WHERE id=?", (command_id, now_s, int(binding["id"])))
+                return
+            if action == "watch" or (command_id and command_id == binding.get("last_command_id")):
+                self._start_ready_timer_locked(con, order, binding)
+            return
+
+        if event_name == "agent_job.failed":
+            if action != "stop_current" and order["status"] != "running":
+                self._interrupt_or_refund_locked(con, order, "failed", "agent_job_failed")
+                con.execute("UPDATE order_control_bindings SET status='failed',last_command_id=COALESCE(?,last_command_id),updated_at=? WHERE id=?", (command_id, now_s, int(binding["id"])))
+            return
+
+        if event_name == "agent_job.requeued":
+            return
+
+        if event_name == "command.succeeded" and (payload.get("action") == "stop_current" or action == "stop_current"):
             if order["status"] in ACTIVE_ORDER_STATUSES | {"interrupted_by_disconnect", "interrupted_by_admin"}:
                 con.execute("UPDATE local_orders SET status='finished',finished_at=?,updated_at=? WHERE id=?", (now_s, now_s, order_id))
                 con.execute("UPDATE order_control_bindings SET status='released',last_command_id=COALESCE(?,last_command_id),updated_at=? WHERE id=?", (command_id, now_s, int(binding["id"])))
             return
 
-        if event_name == "command.failed" and payload.get("action") != "stop_current":
+        if event_name == "command.failed" and (payload.get("action") != "stop_current" and action != "stop_current"):
             if order["status"] != "running":
                 self._interrupt_or_refund_locked(con, order, "failed", "command_failed")
             return
@@ -2686,6 +2752,15 @@ class MerchantService:
         if event_name in {"admin.takeover", "control_session.revoked"}:
             self._interrupt_or_refund_locked(con, order, "interrupted_by_admin", "admin_takeover")
             con.execute("UPDATE order_control_bindings SET status='revoked',updated_at=? WHERE id=?", (now_s, int(binding["id"])))
+            return
+
+        if event_name == "control_session.interrupted":
+            reason = str(payload.get("reason") or "admin_device_maintenance")
+            self._interrupt_or_refund_locked(con, order, "interrupted_by_admin", reason)
+            con.execute("UPDATE order_control_bindings SET status='interrupted',updated_at=? WHERE id=?", (now_s, int(binding["id"])))
+            return
+
+        if event_name == "admin.device_maintenance":
             return
 
         if event_name == "control_session.expired":
@@ -2797,8 +2872,12 @@ class MerchantService:
             except BridgeClientError:
                 continue
             status = state.get("status")
-            if status in {"expired", "force_taken_over", "revoked", "released"}:
-                ev_name = "control_session.expired" if status == "expired" else ("control_session.revoked" if status in {"force_taken_over", "revoked"} else "control_session.released")
+            if status in {"expired", "force_taken_over", "revoked", "released", "interrupted"}:
+                ev_name = (
+                    "control_session.expired"
+                    if status == "expired"
+                    else ("control_session.interrupted" if status == "interrupted" else ("control_session.revoked" if status in {"force_taken_over", "revoked"} else "control_session.released"))
+                )
                 self.process_bridge_event(
                     {
                         "id": f"recovery:{r['control_session_id']}:{status}",

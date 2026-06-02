@@ -49,7 +49,13 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     settings = settings or load_settings()
     db = Database(db_path or settings.db_path)
     bridge_cfg = _stored_bridge_config(db, settings)
-    bridge = bridge_client or BridgeClient(bridge_cfg["base_url"], bridge_cfg["merchant_key"], bridge_cfg["merchant_secret"])
+    bridge = bridge_client or BridgeClient(
+        bridge_cfg["base_url"],
+        bridge_cfg["merchant_key"],
+        bridge_cfg["merchant_secret"],
+        api_prefix=settings.bridge_api_prefix,
+        auth_header_prefix=settings.bridge_auth_header_prefix,
+    )
     service = MerchantService(db, bridge, merchant_ref_secret=settings.merchant_ref_secret, session_ttl_seconds=settings.session_ttl_seconds)
     service.ensure_default_admin(settings.default_admin_username, settings.default_admin_password)
 
@@ -1645,7 +1651,7 @@ def _customer_dashboard_html(customer: dict[str, Any], current: dict[str, Any] |
         <div class="hero-row">
           <div>
             <h2>选择套餐，等待设备准备完成后才开始计时</h2>
-            <div class="hint">商户服务器只在收到中央 <b>device.ready_for_customer_timer</b> 后开始本地倒计时。维护模式开启时不会允许新下单。</div>
+            <div class="hint">商户服务器只在收到中央 <b>device.ready_for_customer_timer</b> 或 <b>agent_job.done/watch</b> 后开始本地倒计时。维护模式开启时不会允许新下单。</div>
             <div class="form-grid">
               <label><span class="hint">购买分钟</span><input id="orderMinutes" type="number" value="60" min="1"></label>
               <label><span class="hint">队伍码</span><input id="teamCode" placeholder="例如 JYG4545"></label>

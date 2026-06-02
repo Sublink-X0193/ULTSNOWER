@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
@@ -8,9 +10,10 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+import httpx
 
 from merchant_portal_server.app import create_app
-from merchant_portal_server.bridge_client import BridgeClientError
+from merchant_portal_server.bridge_client import BridgeClient, BridgeClientError
 from merchant_portal_server.config import Settings
 from merchant_portal_server.db import Database, iso, utcnow
 from merchant_portal_server.service import MerchantError, MerchantService
@@ -233,6 +236,16 @@ class FakeBridge:
             return self._event("control_session.expired", session_id, device_id=sess["device_id"], device_epoch=sess["device_epoch"] + 1, payload={"reason": "renew_timeout"})
 
 
+class CentralTestTransport(httpx.BaseTransport):
+    def __init__(self, client: TestClient):
+        self.client = client
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        raw_path = request.url.raw_path.decode("ascii")
+        resp = self.client.request(request.method, raw_path, content=request.read(), headers=dict(request.headers))
+        return httpx.Response(resp.status_code, headers=resp.headers, content=resp.content, request=request)
+
+
 @pytest.fixture()
 def app_and_bridge(tmp_path):
     bridge = FakeBridge(capacity=3)
@@ -340,6 +353,219 @@ def test_disconnect_expired_event_compensates_order(app_and_bridge):
     app.state.service.process_bridge_event(ev)
     assert app.state.service.get_customer(customer["id"])["balance_minutes"] == 40
     assert client.get("/api/orders/history").json()["orders"][0]["status"] == "interrupted_by_disconnect"
+
+
+def test_snowserver_external_events_start_timer_and_interrupt(app_and_bridge):
+    app, bridge = app_and_bridge
+    client = TestClient(app)
+    customer = register_and_login(client)
+    app.state.service.add_recharge_card("CARD-35", minutes=35)
+    client.post("/api/recharge/redeem", json={"code": "CARD-35"})
+    order = client.post("/api/orders", json={"requested_minutes": 10, "team_code": "EXTDONE"}).json()["order"]
+    sid = order["binding"]["control_session_id"]
+    with app.state.db.connect() as con:
+        watch_cmd = con.execute("SELECT last_command_id FROM order_control_bindings WHERE control_session_id=?", (sid,)).fetchone()["last_command_id"]
+
+    # SNOWSERVER slim external API uses session_id and agent_job.done rather
+    # than the older control_session_id + device.ready_for_customer_timer shape.
+    bridge._event("command.queued", sid, command_id=watch_cmd, device_id=order["binding"]["device_id"], payload={"action": "watch"})
+    bridge.seq += 1
+    bridge.events_log.append(
+        {
+            "id": f"evt_{bridge.seq}",
+            "event_seq": bridge.seq,
+            "event": "agent_job.done",
+            "session_id": sid,
+            "command_id": watch_cmd,
+            "device_id": order["binding"]["device_id"],
+            "payload": {"job_id": 99, "status": "done", "result": {"ok": True}},
+            "created_at": iso(),
+        }
+    )
+    poll = client.post("/internal/workers/events").json()
+    assert poll["processed"] >= 2
+    running = client.get("/api/orders/current").json()["order"]
+    assert running["status"] == "running"
+    assert running["started_at"]
+
+    bridge.seq += 1
+    bridge.events_log.append(
+        {
+            "id": f"evt_{bridge.seq}",
+            "event_seq": bridge.seq,
+            "event": "control_session.interrupted",
+            "session_id": sid,
+            "device_id": order["binding"]["device_id"],
+            "payload": {"reason": "admin_device_maintenance"},
+            "created_at": iso(),
+        }
+    )
+    client.post("/internal/workers/events")
+    hist = client.get("/api/orders/history").json()["orders"][0]
+    assert hist["status"] == "interrupted_by_admin"
+    assert app.state.service.get_customer(customer["id"])["balance_minutes"] > 0
+
+
+def test_bridge_client_external_headers_and_idempotency_retry():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        assert request.url.path == "/api/external/v1/control-sessions"
+        assert request.headers.get("X-External-Key") == "ek_test"
+        assert request.headers.get("X-External-Body-SHA256")
+        assert request.headers.get("X-External-Signature")
+        assert request.headers.get("X-Idempotency-Key") == "claim-demo"
+        if len(seen) == 1:
+            return httpx.Response(409, json={"ok": False, "error": "idempotency_in_progress", "message": "busy"})
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "control_session": {
+                    "control_session_id": "ecs_demo",
+                    "device_id": 7,
+                    "fencing_token": "ft_demo",
+                    "status": "active",
+                    "device_epoch": 0,
+                },
+            },
+        )
+
+    client = BridgeClient(
+        "http://central.test",
+        "ek_test",
+        "secret",
+        transport=httpx.MockTransport(handler),
+        idempotency_retry_delay=0,
+    )
+    sess = client.create_control_session(merchant_context_ref="ref-demo", idem="claim-demo", device_id=7)
+    assert sess["control_session_id"] == "ecs_demo"
+    assert len(seen) == 2
+    assert seen[0].headers["X-External-Nonce"] != seen[1].headers["X-External-Nonce"]
+
+
+def test_bridge_client_external_device_management_paths():
+    calls: list[tuple[str, str, dict[str, Any], str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raw = request.read()
+        import json
+
+        parsed = json.loads(raw.decode("utf-8")) if raw else {}
+        calls.append((request.method, request.url.path, parsed, request.headers.get("X-Idempotency-Key")))
+        if request.url.path.endswith("/disable"):
+            return httpx.Response(200, json={"ok": True, "device": {"id": 12, "enabled": False}})
+        if request.url.path.endswith("/enable"):
+            return httpx.Response(200, json={"ok": True, "device": {"id": 12, "enabled": True}})
+        return httpx.Response(200, json={"ok": True, "device": {"id": 12, "accept_orders": parsed.get("accept_orders")}})
+
+    client = BridgeClient("http://central.test", "ek", "secret", transport=httpx.MockTransport(handler), idempotency_retry_delay=0)
+    assert client.set_device_mode(12, "absolute", idem="mode-12")["accept_orders"] is None
+    assert client.set_device_enabled(12, False, idem="disable-12")["enabled"] is False
+    assert client.set_device_enabled(12, True, idem="enable-12")["enabled"] is True
+    assert client.set_device_accept_orders(12, False, idem="accept-12")["accept_orders"] is False
+    assert calls == [
+        ("PUT", "/api/external/v1/devices/12", {"mode": "absolute"}, "mode-12"),
+        ("POST", "/api/external/v1/devices/12/disable", {}, "disable-12"),
+        ("POST", "/api/external/v1/devices/12/enable", {}, "enable-12"),
+        ("PUT", "/api/external/v1/devices/12", {"accept_orders": False}, "accept-12"),
+    ]
+
+
+def test_live_snowserver_slim_external_bridge_integration(tmp_path, monkeypatch):
+    central_root = os.environ.get("SNOWSERVER_REPO", r"C:\Users\WS\Documents\SNOWSERVER")
+    if not os.path.exists(os.path.join(central_root, "snow_mock_server", "app", "main.py")):
+        pytest.skip("SNOWSERVER repo not available")
+    sys.path.insert(0, central_root)
+    monkeypatch.setenv("SNOW_DATA_DIR", str(tmp_path / "central_data"))
+    monkeypatch.setenv("SNOW_SLIM_LEGACY_MODE", "1")
+
+    # Import after env is set so the central test app uses an isolated DB.
+    from snow_mock_server.app.db import init_db  # type: ignore
+
+    init_db(force_seed=True)
+    from snow_mock_server.app import main as central_main  # type: ignore
+    from snow_mock_server.app.main import app as central_app  # type: ignore
+
+    central_main.SLIM_LEGACY_MODE = True
+    central = TestClient(central_app)
+    login = central.post("/api/login", json={"tenant_id": 5782, "username": "ppp4002", "password": "ppp4002"})
+    assert login.status_code == 200, login.text
+    assert login.json()["ok"]
+    made_key = central.post("/api/admin/api-keys", json={"name": "merchant-it"}).json()
+    assert made_key["ok"]
+    key_id = made_key["api_key"]["key_id"]
+    secret = made_key["api_key"]["secret"]
+
+    devices = central.get("/api/admin/devices").json()["devices"]
+    dev = next(d for d in devices if not d.get("running_order_id"))
+    hb = central.post(
+        "/api/machine/heartbeat",
+        json={
+            "machine_id": dev["device_key"],
+            "state": "空闲",
+            "current_map": "",
+            "remaining_time": 0,
+            "client_version": "merchant-it",
+            "timestamp": "2026-06-03 12:00:00",
+        },
+    )
+    assert hb.status_code == 200, hb.text
+    assert hb.json()["ok"]
+
+    bridge = BridgeClient(
+        "http://central.test",
+        key_id,
+        secret,
+        transport=CentralTestTransport(central),
+        api_prefix="/api/external/v1",
+        auth_header_prefix="External",
+        idempotency_retry_delay=0,
+    )
+    managed = bridge.create_device(machine_id="it-machine-api", display_name="API联调设备", mode="hybrid", idem="it-device-create")
+    assert managed["machine_id"] == "it-machine-api"
+    updated = bridge.update_device(int(managed["id"]), display_name="API联调设备2", accept_orders=False, idem="it-device-update")
+    assert updated["display_name"] == "API联调设备2"
+    assert updated["accept_orders"] is False
+    mode_changed = bridge.set_device_mode(int(managed["id"]), "absolute", idem="it-device-mode")
+    assert mode_changed["mode"] == "absolute"
+    assert bridge.set_device_enabled(int(managed["id"]), False, idem="it-device-disable")["enabled"] is False
+    assert bridge.set_device_enabled(int(managed["id"]), True, idem="it-device-enable")["enabled"] is True
+    assert bridge.delete_device(int(managed["id"]), idem="it-device-delete")["device_id"] == int(managed["id"])
+    device_events = [e["event"] for e in bridge.events(cursor=0, limit=100).get("events", [])]
+    assert {"device.created", "device.updated", "device.disabled", "device.enabled", "device.deleted"}.issubset(set(device_events))
+
+    merchant_app = create_app(db_path=tmp_path / "merchant.sqlite", bridge_client=bridge)
+    merchant = TestClient(merchant_app)
+    register_and_login(merchant, "central_it")
+    merchant_app.state.service.add_recharge_card("CARD-CENTRAL-30", minutes=30)
+    assert merchant.post("/api/recharge/redeem", json={"code": "CARD-CENTRAL-30"}).status_code == 200
+
+    ordered = merchant.post("/api/orders", json={"requested_minutes": 10, "team_code": "CEN123"}).json()["order"]
+    assert ordered["status"] == "waiting_ready_timer"
+    claim = central.post("/api/machine/jobs/claim", json={"machine_id": dev["device_key"], "capacity": 10}).json()
+    jobs = [j for j in claim["jobs"] if j["payload"].get("external_session_id") == ordered["binding"]["control_session_id"]]
+    assert {j["payload"]["action"] for j in jobs} >= {"set_loadout", "enter_team", "ready", "watch"}
+    for job in jobs:
+        ack = central.post(f"/api/machine/jobs/{job['id']}/ack", json={"machine_id": dev["device_key"], "result": {"ok": True, "action": job["payload"]["action"]}})
+        assert ack.status_code == 200, ack.text
+        assert ack.json()["ok"]
+
+    poll = merchant.post("/internal/workers/events").json()
+    assert poll["processed"] >= 1
+    running = merchant.get("/api/orders/current").json()["order"]
+    assert running["status"] == "running"
+    assert running["started_at"]
+
+    blocked = central.put(f"/api/admin/devices/{dev['id']}/toggle", json={"enabled": False})
+    assert blocked.status_code == 409
+    assert blocked.json()["error"] == "device_has_active_external_session"
+    forced = central.put(f"/api/admin/devices/{dev['id']}/toggle?force=true", json={"enabled": False})
+    assert forced.status_code == 200, forced.text
+    merchant.post("/internal/workers/events")
+    hist = merchant.get("/api/orders/history").json()["orders"][0]
+    assert hist["status"] == "interrupted_by_admin"
 
 
 def test_same_customer_duplicate_click_reuses_active_order(tmp_path):

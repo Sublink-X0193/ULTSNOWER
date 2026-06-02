@@ -11,6 +11,8 @@ class Settings:
     bridge_base_url: str = os.getenv("BRIDGE_BASE_URL", "http://127.0.0.1:8010")
     bridge_merchant_key: str = os.getenv("BRIDGE_MERCHANT_KEY", "mk_test")
     bridge_merchant_secret: str = os.getenv("BRIDGE_MERCHANT_SECRET", "secret")
+    bridge_api_prefix: str = os.getenv("BRIDGE_API_PREFIX", "/api/external/v1")
+    bridge_auth_header_prefix: str = os.getenv("BRIDGE_AUTH_HEADER_PREFIX", "External")
     merchant_ref_secret: str = os.getenv("MERCHANT_REF_SECRET", "dev-merchant-ref-secret-change-me")
     session_ttl_seconds: int = int(os.getenv("MERCHANT_SESSION_TTL_SECONDS", "86400"))
     enable_background_workers: bool = os.getenv("MERCHANT_ENABLE_BACKGROUND_WORKERS", "0") in {"1", "true", "TRUE", "yes"}
