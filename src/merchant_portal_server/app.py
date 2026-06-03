@@ -604,9 +604,19 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     def api_enabled_equipment(_customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
         cfg = service.get_equipment_config()
         equipment = [e for e in (cfg.get("equipment") or []) if int(e.get("enabled") or 0) == 1]
+        public_equipment = [
+            {
+                "equipment_type": e.get("equipment_type"),
+                "equipment_name": e.get("equipment_name"),
+                "type_label": e.get("type_label"),
+                "price": int(e.get("price") or 0),
+                "enabled": int(e.get("enabled") or 0),
+                "sort_order": int(e.get("sort_order") or 0),
+            }
+            for e in equipment
+        ]
         return json_ok(
-            equipment=equipment,
-            supported_equipment=cfg.get("supported_equipment") or [],
+            equipment=public_equipment,
             max_loadout_cost=cfg.get("max_loadout_cost", 65),
             allow_custom_loadout=cfg.get("allow_custom_loadout", True),
         )
@@ -3571,7 +3581,7 @@ function renderEquipmentConfig() {
     <td><b>${esc(e.equipment_name)}</b></td>
     <td><input class="config-input" type="number" min="0" value="${esc(e.price || 0)}" onchange="updateEquipmentPrice(${idx}, this.value)"></td>
     <td><label class="switch-line"><input type="checkbox" ${e.enabled ? 'checked' : ''} onchange="updateEquipmentEnabled(${idx}, this.checked)"> 启用</label></td>
-    <td>${e.client_supported ? '<span class="badge badge-unused">支持</span>' : '<span class="badge badge-offline">不支持</span>'}</td>
+    <td>${e.device_supported ? '<span class="badge badge-unused">支持</span>' : '<span class="badge badge-offline">不支持</span>'}</td>
   </tr>`).join('') + '</tbody></table>';
 }
 function updateEquipmentPrice(idx, value) { if (_equipmentRows[idx]) _equipmentRows[idx].price = Math.max(0, Number(value || 0)); }

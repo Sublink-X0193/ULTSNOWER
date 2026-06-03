@@ -2274,7 +2274,7 @@ class MerchantService:
                     "price": 0,
                     "enabled": 0,
                     "sort_order": sort_order,
-                    "client_supported": True,
+                    "device_supported": True,
                 })
                 idx += 1
         return out
@@ -2297,7 +2297,7 @@ class MerchantService:
                 "price": max(0, int(item.get("price") or 0)),
                 "enabled": 1 if bool(item.get("enabled")) else 0,
                 "sort_order": int(item.get("sort_order") or i),
-                "client_supported": True,
+                "device_supported": bool(item.get("device_supported", item.get("client_supported", True))),
             })
         return out
 
