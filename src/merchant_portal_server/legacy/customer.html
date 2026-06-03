@@ -1651,7 +1651,7 @@
     </div>
 
     <script>
-        // ===== 登录跳转辅助：保住当前租户上下文 =====
+        // ===== 登录跳转辅助 =====
         const _CURRENT_TENANT_ID = parseInt('0') || 0;
         function _loginUrl() {
             if (_CURRENT_TENANT_ID > 0) return '/login?tenant=' + _CURRENT_TENANT_ID;
@@ -1924,7 +1924,7 @@
         const CURRENT_USER_ID = 5827;
         const CURRENT_TENANT_ID = 0;
         const CARD_RECHARGE_ENABLED = true;
-        // 由后端注入：主系统默认开，子系统按 settings.recharge_enabled。租户隔离由 session.tenant_id 兜底。
+        // 由后端注入：是否启用自助充值。
         const SELF_RECHARGE_ENABLED = true;
 
         function syncRechargeVisibility() {

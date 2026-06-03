@@ -133,7 +133,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         path = request.url.path
         if setup_required_effective() and not setup_exempt_path(path):
             if path.startswith("/api/") or request.method.upper() != "GET":
-                return json_fail("setup_required", "请先完成 Bridge API Key 首次配置", 428)
+                return json_fail("setup_required", "请先完成服务接入首次配置", 428)
             return RedirectResponse("/setup", status_code=303)
         if path.startswith("/internal/") and not internal_worker_request_allowed(request):
             return json_fail("forbidden_internal_endpoint", "内部任务接口只允许本机或携带内部令牌访问", 403)
@@ -199,7 +199,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
 
     def require_owner_admin(admin: dict[str, Any]) -> dict[str, Any]:
         if str(admin.get("role") or "") != "owner":
-            raise MerchantError("permission_denied", "该操作需要 owner 权限", 403)
+            raise MerchantError("permission_denied", "该操作需要主管理员权限", 403)
         return admin
 
     def maybe_admin(request: Request) -> dict[str, Any] | None:
@@ -480,7 +480,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
                 )
                 service.bridge = new_bridge
                 app.state.bridge = new_bridge
-        msg = "首次配置已保存" if not has_bridge_credentials else "全局设置与 Bridge API Key 已保存"
+        msg = "首次配置已保存" if not has_bridge_credentials else "全局设置与接入信息已保存"
         return json_ok(msg=msg, bridge=setup_config_view(), settings=admin_settings_view(service.get_settings()), redirect="/login")
 
     # JSON API
@@ -686,7 +686,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     def api_legacy_switch_device(order_id: int, body: dict[str, Any] = Body(default_factory=dict), customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
         order = service.customer_rejoin_order(order_id, customer["id"], body.get("boss_name") or body.get("team_code") or "")
         service.log_customer_action(customer["id"], customer.get("username"), "customer_switch_device_request", "order", order_id, {"team_code": body.get("boss_name") or body.get("team_code") or ""})
-        return json_ok(msg="已记录换机请求；中央 Bridge 会按当前会话保护策略继续执行", order=_legacy_order_view(order, service.get_settings()))
+        return json_ok(msg="已记录换机请求；系统会继续处理当前订单", order=_legacy_order_view(order, service.get_settings()))
 
     @app.post("/api/recharge/redeem")
     def api_recharge(body: dict[str, Any] = Body(...), customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
@@ -1173,9 +1173,9 @@ def _setup_html(cfg: dict[str, Any], *, require_admin_password: bool = True) -> 
     if first_run_admin_create:
         admin_title = "本地管理员账户创建"
         admin_fields = """
-          <label>管理员用户名<input id="adminUsername" value="admin" autocomplete="username" placeholder="设置本地 owner 管理员用户名"></label>
+          <label>管理员用户名<input id="adminUsername" value="admin" autocomplete="username" placeholder="设置本地主管理员用户名"></label>
           <label>管理员密码<input id="adminPassword" type="password" autocomplete="new-password" placeholder="设置本地管理员密码，至少 6 位"></label>
-          <div class="hint">首次配置会创建/替换本地 owner 管理员账户；后续进入商户后台使用该账户登录。</div>
+          <div class="hint">首次配置会创建/替换本地主管理员账户；后续进入商户后台使用该账户登录。</div>
         """
     elif require_admin_password:
         admin_title = "本地管理员验证"
@@ -1186,10 +1186,13 @@ def _setup_html(cfg: dict[str, Any], *, require_admin_password: bool = True) -> 
     else:
         admin_title = "本地管理员账户"
         admin_fields = "<div class='hint'>已登录管理员，会直接保存到本地配置。</div>"
-    skip_button = "" if cfg.get("setup_enforced") else """<button class="btn-secondary" onclick="location.href='/login'">测试期跳过 API Key，进入登录页</button>"""
-    setup_note = "正式模式：必须填入 Bridge API Key 后才能进入业务页面。" if cfg.get("setup_enforced") else "测试期间：当前不强制填写 API Key；可先保存全局设置，Bridge Key/Secret 留空。"
+    skip_button = "" if cfg.get("setup_enforced") else """<button class="btn-secondary" onclick="location.href='/login'">暂不填写接入信息，进入登录页</button>"""
+    setup_note = "请填写平台提供的服务地址与接入凭据后进入业务页面。" if cfg.get("setup_enforced") else "当前允许先保存基础设置，服务接入信息可稍后补充。"
+    bridge_base_url_value = str(cfg.get("bridge_base_url") or "")
+    if bridge_base_url_value.strip() in {"http://127.0.0.1:8010", "http://localhost:8010"} and not cfg.get("bridge_configured"):
+        bridge_base_url_value = ""
     return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>首次配置 Bridge API Key / 全局设置</title>
+    <title>首次配置服务接入 / 全局设置</title>
     <style>
     *{{box-sizing:border-box}} body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;background:#eef2ff;min-height:100vh;margin:0;color:#111827;padding:28px}}
     .card{{width:min(980px,96vw);background:#fff;border-radius:18px;box-shadow:0 24px 80px rgba(30,64,175,.18);padding:28px;margin:0 auto}}
@@ -1202,7 +1205,7 @@ def _setup_html(cfg: dict[str, Any], *, require_admin_password: bool = True) -> 
     .err{{background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;padding:10px;border-radius:10px;margin:10px 0}}
     @media(max-width:760px){{.grid{{grid-template-columns:1fr}} body{{padding:12px}}}}
     </style></head><body><div class="card">
-      <h1>{_escape(st.get("system_name") or cfg.get("system_name") or "商户服务器")} · 首次配置 Bridge API Key / 全局设置</h1>
+      <h1>{_escape(st.get("system_name") or cfg.get("system_name") or "商户服务器")} · 首次配置服务接入 / 全局设置</h1>
       <div class="banner">{_escape(setup_note)}</div>
       <div id="msg"></div>
       <div class="section">
@@ -1210,13 +1213,13 @@ def _setup_html(cfg: dict[str, Any], *, require_admin_password: bool = True) -> 
         {admin_fields}
       </div>
       <div class="section">
-        <h2>中央 Bridge / API Key 地址</h2>
+        <h2>服务接入信息</h2>
         <div class="grid">
-          <div class="full"><label>中央 Bridge 地址 / API Key 填入地址<input id="bridgeBaseUrl" value="{_escape(cfg.get("bridge_base_url") or "http://127.0.0.1:8010")}" placeholder="https://bridge.example.com 或 http://127.0.0.1:8010"></label></div>
-          <div><label>Merchant Key<input id="bridgeKey" value="{_escape(cfg.get("bridge_merchant_key") if cfg.get("bridge_merchant_key") != "mk_test" else "")}" placeholder="mk_xxx"></label></div>
-          <div><label>Merchant Secret<input id="bridgeSecret" type="password" placeholder="中央生成的 Secret；测试期可留空"></label></div>
+          <div class="full"><label>服务地址<input id="bridgeBaseUrl" value="{_escape(bridge_base_url_value)}" placeholder="https://service.example.com"></label></div>
+          <div><label>接入账号<input id="bridgeKey" value="{_escape(cfg.get("bridge_merchant_key") if cfg.get("bridge_merchant_key") != "mk_test" else "")}" placeholder="平台提供的账号"></label></div>
+          <div><label>接入密钥<input id="bridgeSecret" type="password" placeholder="平台提供的密钥"></label></div>
         </div>
-        <div class="hint">Bridge 地址支持 HTTPS 域名，例如 https://bridge.example.com；也支持本地 http://127.0.0.1:8010。Secret 保存后不会在界面回显；测试期留空时不会更新 Bridge 配置。</div>
+        <div class="hint">请填写平台提供的服务地址与接入凭据；密钥保存后不会在界面回显，留空则不更新已有密钥。</div>
       </div>
       <div class="section">
         <h2>全局设置</h2>
@@ -1234,12 +1237,12 @@ def _setup_html(cfg: dict[str, Any], *, require_admin_password: bool = True) -> 
         </div>
         <label class="switch"><input id="settingNightTimeCheck" type="checkbox" {checked("night_time_check")}> 启用包夜卡登录时间限制</label>
         <label class="switch"><input id="settingPrivacyMode" type="checkbox" {checked("privacy_mode_enabled")}> 启用隐私模式</label>
-        <label class="switch"><input id="settingAceEnabled" type="checkbox" {checked("ace_enabled")}> 启用 ACE/白嫖检测</label>
+        <label class="switch"><input id="settingAceEnabled" type="checkbox" {checked("ace_enabled")}> 启用异常结单检测</label>
         <label class="switch"><input id="settingAllowCustomLoadout" type="checkbox" {checked("allow_custom_loadout")}> 允许客户自定义绝密配装</label>
         <label class="switch"><input id="settingMaintenanceMode" type="checkbox" {checked("maintenance_mode_enabled")}> 平台维护模式</label>
         <label class="switch"><input id="settingAnnouncementEnabled" type="checkbox" {checked("announcement_enabled")}> 启用公告栏</label>
       </div>
-      <button onclick="save()">保存全局设置 / API Key</button>
+      <button onclick="save()">保存全局设置 / 接入信息</button>
       {skip_button}
     </div><script>
     const $ = id => document.getElementById(id);
@@ -1764,7 +1767,7 @@ def _customer_dashboard_html(customer: dict[str, Any], current: dict[str, Any] |
         <div class="hero-row">
           <div>
             <h2>选择套餐，等待设备准备完成后才开始计时</h2>
-            <div class="hint">商户服务器只在收到中央 <b>device.ready_for_customer_timer</b> 或 <b>agent_job.done/watch</b> 后开始本地倒计时。维护模式开启时不会允许新下单。</div>
+            <div class="hint">订单会在设备准备完成后开始计时；维护模式开启时不会允许新下单。</div>
             <div class="form-grid">
               <label><span class="hint">购买分钟</span><input id="orderMinutes" type="number" value="60" min="1"></label>
               <label><span class="hint">队伍码</span><input id="teamCode" placeholder="例如 JYG4545"></label>
@@ -1774,9 +1777,9 @@ def _customer_dashboard_html(customer: dict[str, Any], current: dict[str, Any] |
             <button class="btn-sm btn-gray" onclick="loadAll()">刷新状态</button>
           </div>
           <div class="cards">
-            <div class="card"><div class="card-title">中央容量</div><div class="card-value">__CAPACITY__</div><div class="hint">available: __AVAILABLE__</div></div>
+            <div class="card"><div class="card-title">当前可用</div><div class="card-value">__CAPACITY__</div><div class="hint">空闲设备：__AVAILABLE__</div></div>
             <div class="card"><div class="card-title">当前订单</div><div class="card-value" id="currentStatusCard">-</div><div class="hint" id="currentRemainCard">等待刷新</div></div>
-            <div class="card"><div class="card-title">计费边界</div><div class="card-value">Ready</div><div class="hint">不在 claim/bundle 阶段偷跑计时</div></div>
+            <div class="card"><div class="card-title">计时规则</div><div class="card-value">准备后计时</div><div class="hint">设备未准备完成前不扣时</div></div>
           </div>
         </div>
       </div>
@@ -1814,13 +1817,17 @@ function toast(msg){
 }
 function fmtMin(m){m=Number(m||0);return m>=60?`${Math.floor(m/60)}时${m%60}分`:`${m}分`}
 function remain(o){ if(!o||!o.end_at)return 0; return Math.max(0, Math.ceil((new Date(o.end_at)-new Date())/60000)); }
-function badge(s){ const cls=s==='running'?'badge-ok':(s==='waiting_ready_timer'||s==='stopping'?'badge-warn':'badge-gray'); return `<span class="badge ${cls}">${esc(s||'-')}</span>`; }
+function statusText(s){
+  const map={created:'已创建',paid:'已支付',claiming_device:'分配设备中',device_claimed:'设备已分配',commanding:'下发中',waiting_ready_timer:'等待设备准备',running:'运行中',stopping:'停止中',finished:'已完成',failed:'失败',interrupted_by_admin:'管理员中断',interrupted_by_disconnect:'设备失联中断'};
+  return map[s] || s || '-';
+}
+function badge(s){ const cls=s==='running'?'badge-ok':(s==='waiting_ready_timer'||s==='stopping'||s==='claiming_device'||s==='device_claimed'||s==='commanding'?'badge-warn':'badge-gray'); return `<span class="badge ${cls}">${esc(statusText(s))}</span>`; }
 function showTab(name){ document.querySelectorAll('.nav-tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===name)); document.querySelectorAll('.tab-panel').forEach(p=>p.classList.toggle('active',p.id==='tab-'+name)); if(name==='current')loadCurrent(); if(name==='history')loadHistory(); }
 document.querySelectorAll('.nav-tab').forEach(t=>t.addEventListener('click',()=>showTab(t.dataset.tab)));
 async function loadCurrent(){
   const d=await api('/api/orders/current'); const o=d.order;
-  $('currentStatusCard').textContent=o?o.status:'暂无';
-  $('currentRemainCard').textContent=o&&o.end_at?`剩余 ${fmtMin(remain(o))}`:'收到 ready 事件后开始计时';
+  $('currentStatusCard').textContent=o?statusText(o.status):'暂无';
+  $('currentRemainCard').textContent=o&&o.end_at?`剩余 ${fmtMin(remain(o))}`:'设备准备完成后开始计时';
   $('currentBox').innerHTML = o ? `<table class="orders-table"><tbody>
     <tr><th>订单号</th><td>${esc(o.local_order_no)}</td></tr><tr><th>状态</th><td>${badge(o.status)}</td></tr>
     <tr><th>购买时长</th><td>${fmtMin(o.requested_minutes)}</td></tr><tr><th>剩余</th><td><b>${fmtMin(remain(o))}</b></td></tr>
@@ -1835,7 +1842,7 @@ async function placeOrder(){
   try {
     const body={requested_minutes:Number($('orderMinutes').value||0),team_code:$('teamCode').value,quality:$('quality').value};
     await api('/api/orders',{method:'POST',headers:{'X-Idempotency-Key':'web-'+Date.now()},body:JSON.stringify(body)});
-    toast('下单已创建，等待设备 ready 后开始计时'); showTab('current'); await loadAll();
+    toast('下单已创建，等待设备准备完成后开始计时'); showTab('current'); await loadAll();
   } catch(e){ toast(e.message); }
 }
 async function redeem(){
@@ -1976,7 +1983,7 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
   <div class="topbar">
     <div class="topbar-logo">__SYSTEM_NAME__ · 管理后台</div>
     <div class="topbar-right">
-      <span>__ADMIN__ / __ROLE__</span>
+      <span>__ADMIN__ / __ROLE_LABEL__</span>
       <button class="btn-sm btn-gray" onclick="location.href='/'">客户首页</button>
       <form method="post" action="/merchant-admin/logout" style="display:inline"><button class="btn-sm btn-danger">退出</button></form>
     </div>
@@ -2041,7 +2048,7 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
           <button class="btn-sm btn-gray" onclick="loadDevicesAdmin(true)">🔄 刷新</button>
         </div>
       </div>
-      <div class="hint" style="margin-bottom:10px">设备新增、机器模式切换、设备码绑定都通过中央 Bridge API Key 执行；直控仍走 control session + fencing token + command queue。</div>
+      <div class="hint" style="margin-bottom:10px">设备新增、模式切换、设备绑定和远程控制均通过已配置的服务接入凭据执行。</div>
       <div id="devicesTable"></div>
     </div>
 
@@ -2087,7 +2094,7 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
           <label class="switch-line"><input type="checkbox" id="allowCustomLoadout"> 允许客户自定义配装</label>
           <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;">最大配装价值 <input type="number" id="maxLoadoutCost" min="0" class="config-input" value="65"> W</label>
         </div>
-        <div class="hint" style="margin-top:8px">这些是拆分前全局装备配置迁移到商户端的本地参数；中央 Bridge/Agent 执行时消费商户订单里的配置，不在商户端直接控制设备。</div>
+        <div class="hint" style="margin-top:8px">这些装备参数会随订单下发到设备端；商户后台负责保存配置，不直接运行设备脚本。</div>
       </div>
       <div id="equipmentConfigTable"></div>
     </div>
@@ -2095,7 +2102,7 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
     <div id="tab-orders" class="tab-panel">
       <div class="section-header"><span class="section-title">订单管理 / 剩余时长显示修改</span><button class="btn-sm btn-primary" onclick="loadOrders()">刷新订单</button></div>
       <div class="toolbar">
-        <input id="orderKeyword" placeholder="搜索客户 / 队伍码 / session" onkeydown="if(event.key==='Enter')loadOrders()">
+        <input id="orderKeyword" placeholder="搜索客户 / 队伍码 / 订单号" onkeydown="if(event.key==='Enter')loadOrders()">
         <select id="orderStatus" onchange="loadOrders()">
           <option value="">全部状态</option><option value="waiting_ready_timer">等待计时</option><option value="running">运行中</option><option value="stopping">停止中</option><option value="finished">已完成</option><option value="failed">失败</option><option value="interrupted_by_admin">管理员中断</option><option value="interrupted_by_disconnect">失联中断</option>
         </select>
@@ -2109,13 +2116,13 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
         <span class="section-title">商户管理员 / 权限管理</span>
         <div><button class="btn-sm btn-primary" onclick="openAdminModal()">+ 新建管理员</button><button class="btn-sm btn-gray" onclick="loadAdmins()">刷新</button></div>
       </div>
-      <div class="hint" style="margin-bottom:10px">owner 可配置系统、客户余额、卡密、设备直控、备份恢复和管理员；operator 仅用于查看运营数据、客户、订单、设备和审计。</div>
+      <div class="hint" style="margin-bottom:10px">主管理员可配置系统、客户余额、卡密、设备直控、备份恢复和管理员；操作员仅用于查看运营数据、客户、订单、设备和审计。</div>
       <div id="adminsTable"></div>
     </div>
 
     <div id="tab-audit" class="tab-panel">
       <div class="section-header"><span class="section-title">权限与敏感操作审计</span><button class="btn-sm btn-primary" onclick="loadAuditLogs()">刷新审计</button></div>
-      <div class="hint" style="margin-bottom:10px">记录 Bridge API Key 配置、管理员手动下单、设备直控、管理员换队等敏感动作，便于上线后追责。</div>
+      <div class="hint" style="margin-bottom:10px">记录接入配置、管理员手动下单、设备直控、管理员换队等敏感操作，便于审计。</div>
       <div id="auditTable"></div>
     </div>
 
@@ -2240,9 +2247,9 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
         <div class="field">
           <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;">
             <input type="checkbox" id="settingAceEnabled" style="width:auto;" />
-            下雪反作弊系统 XX-ACE（订单反白嫖）
+            订单异常结单检测
           </label>
-          <div class="hint">开启后，若客户在机器"已准备待进图"状态下主动结单，系统将开启2分钟检测窗口：机器下一状态若为"空闲"则订单正常；若进入"选择干员中"则判定白嫖，自动冻结该客户账号</div>
+          <div class="hint">开启后，若客户在机器"已准备待进图"状态下主动结单，系统将开启2分钟检测窗口：机器下一状态若为"空闲"则订单正常；若进入"选择干员中"则判定异常结单，自动冻结该客户账号</div>
         </div>
 
         <div class="field" style="border:1px solid #fde68a;background:#fffbeb;padding:10px 12px;border-radius:8px;">
@@ -2328,10 +2335,10 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
         <div class="field"><label>用户名</label><input id="adminNewUsername" placeholder="后台登录用户名"></div>
         <div class="field"><label>密码</label><input id="adminNewPassword" value="123456" placeholder="至少 6 位"></div>
         <div class="field-row">
-          <div class="field"><label>角色</label><select id="adminNewRole"><option value="operator">operator / 只读运营</option><option value="owner">owner / 完整管理</option></select></div>
-          <div class="field"><label>状态</label><select id="adminNewStatus"><option value="active">active</option><option value="disabled">disabled</option></select></div>
+          <div class="field"><label>角色</label><select id="adminNewRole"><option value="operator">操作员 / 只读运营</option><option value="owner">主管理员 / 完整管理</option></select></div>
+          <div class="field"><label>状态</label><select id="adminNewStatus"><option value="active">启用</option><option value="disabled">禁用</option></select></div>
         </div>
-        <div class="hint">正式上线建议日常使用 operator 查看数据，owner 只用于配置、充值卡、客户余额、设备直控、备份恢复。</div>
+        <div class="hint">建议日常使用操作员账号查看数据，主管理员账号仅用于配置、充值卡、客户余额、设备直控和备份恢复。</div>
       </div>
       <div class="modal-foot"><button class="btn-sm btn-gray" onclick="closeModal('adminModal')">取消</button><button class="btn-sm btn-primary" onclick="submitCreateAdmin()">创建</button></div>
     </div>
@@ -2415,7 +2422,7 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
           <div class="field"><label>小时</label><input id="addTimeHours" type="number" min="0" max="24" value="0"></div>
           <div class="field"><label>分钟</label><input id="addTimeMinutes" type="number" min="0" max="59" value="30"></div>
         </div>
-        <div class="hint">会直接修改商户本地订单的购买时长/结束时间；中央设备只接收最终 stop。</div>
+        <div class="hint">会直接修改订单购买时长/结束时间；系统会同步最终停止指令。</div>
       </div>
       <div class="modal-foot"><button class="btn-sm btn-gray" onclick="closeModal('addTimeModal')">取消</button><button class="btn-sm btn-green" onclick="submitAdjustOrder()">确认调整</button></div>
     </div>
@@ -2448,8 +2455,8 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
         </div>
         <div class="field" id="fieldDeviceKey">
           <label>机器ID / 设备码</label>
-          <input type="text" id="deviceKey" placeholder="粘贴客户端显示的机器ID" style="font-family:monospace;" />
-          <div class="hint" id="cardKeyHint">从客户端界面复制机器ID粘贴到此处；保存会通过 Bridge API Key 写入中央。</div>
+          <input type="text" id="deviceKey" placeholder="粘贴设备端显示的机器ID" style="font-family:monospace;" />
+          <div class="hint" id="cardKeyHint">从设备端界面复制机器ID粘贴到此处；保存后会同步到设备服务。</div>
         </div>
         <div class="field">
           <label>运行模式</label>
@@ -2629,9 +2636,18 @@ document.querySelectorAll('.modal-mask').forEach(m => m.addEventListener('click'
   if (m.id === 'confirmModal') resolveConfirm(false);
   else m.classList.remove('show');
 }));
+function statusLabel(status) {
+  const map = {
+    created:'已创建', paid:'已支付', claiming_device:'分配设备中', device_claimed:'设备已分配',
+    commanding:'下发中', waiting_ready_timer:'等待设备准备', running:'运行中', stopping:'停止中',
+    finished:'已完成', failed:'失败', interrupted_by_admin:'管理员中断', interrupted_by_disconnect:'设备失联中断',
+    active:'正常', frozen:'冻结', disabled:'禁用'
+  };
+  return map[status] || status || '-';
+}
 function statusBadge(status) {
   const cls = status === 'running' ? 'badge-running' : (status === 'waiting_ready_timer' || status === 'stopping' ? 'badge-waiting' : (status === 'finished' ? 'badge-done' : (String(status).includes('failed') || String(status).includes('interrupted') ? 'badge-failed' : 'badge-offline')));
-  return `<span class="badge ${cls}">${esc(status || '-')}</span>`;
+  return `<span class="badge ${cls}">${esc(statusLabel(status))}</span>`;
 }
 function onlineBadge(v) { return v ? '<span class="badge badge-online">在线</span>' : '<span class="badge badge-offline">离线</span>'; }
 function fmtMin(m) { m = Number(m || 0); return m >= 60 ? `${Math.floor(m/60)}时${m%60}分` : `${m}分`; }
@@ -2820,7 +2836,7 @@ async function submitResetPwd() {
   } catch(e) { toast(e.message); }
 }
 async function setCustomerStatus(id, status) {
-  const ok = await appConfirm(status === 'frozen' ? '冻结客户' : '解冻客户', status === 'frozen' ? '确认冻结该客户？冻结后会清理客户在线 session。' : '确认解冻该客户？', status === 'frozen' ? 'btn-amber' : 'btn-primary');
+  const ok = await appConfirm(status === 'frozen' ? '冻结客户' : '解冻客户', status === 'frozen' ? '确认冻结该客户？冻结后会清理客户在线状态。' : '确认解冻该客户？', status === 'frozen' ? 'btn-amber' : 'btn-primary');
   if (!ok) return;
   try {
     await api(`/api/admin/customers/${id}/status`, {method:'PUT', body:JSON.stringify({status})});
@@ -2936,7 +2952,7 @@ function onDeviceSortChange() { loadDevicesAdmin(); }
 function renderDevicesAdmin(rows) {
   rows = sortDevicesForAdmin(rows || []);
   updateDeviceStatusBadge(rows);
-  if (!rows.length) { $('devicesTable').innerHTML = '<div class="empty-state">暂无设备；请先在 /setup 配置 Bridge API Key，并确认中央 Bridge 已有 Agent 或点击添加设备。</div>'; return; }
+  if (!rows.length) { $('devicesTable').innerHTML = '<div class="empty-state">暂无设备；请先完成服务接入配置，并确认已添加或上线设备。</div>'; return; }
   $('devicesTable').innerHTML = `<table class="data-table"><thead><tr>
     <th>ID</th><th>名称/设备码</th><th>模式</th><th>在线</th><th>工作状态</th><th>详情</th>
     <th>上机用户</th><th>剩余时长</th><th>预计结束</th><th>哈币</th><th>老板ID</th><th>已打局</th><th>已打币</th><th>版本</th><th>启用/接单</th><th>操作</th>
@@ -3054,7 +3070,7 @@ function openAddDeviceModal() {
   $('deviceRadarUrl').value = '';
   $('deviceWatchdogCard').value = '';
   $('deviceModalTitle').textContent = '添加设备';
-  $('cardKeyHint').textContent = '从客户端界面复制机器ID粘贴到此处；保存会通过 Bridge API Key 写入中央。';
+  $('cardKeyHint').textContent = '从设备端界面复制机器ID粘贴到此处；保存后会同步到设备服务。';
   openModal('addDeviceModal');
 }
 function closeAddDeviceModal() { closeModal('addDeviceModal'); }
@@ -3066,7 +3082,7 @@ function editDevice(id, name, key, mode, radarUrl, watchdogCard) {
   $('deviceRadarUrl').value = radarUrl || '';
   $('deviceWatchdogCard').value = watchdogCard || '';
   $('deviceModalTitle').textContent = '编辑设备';
-  $('cardKeyHint').textContent = '修改机器ID将更换绑定的客户端；保存会通过 Bridge API Key 写入中央。';
+  $('cardKeyHint').textContent = '修改机器ID将更换绑定的设备端；保存后会同步到设备服务。';
   openModal('addDeviceModal');
 }
 async function submitDevice() {
@@ -3114,7 +3130,7 @@ async function toggleAcceptOrders(id, acceptOrders) {
   } catch(e) { toast(e.message); }
 }
 async function deleteDevice(id) {
-  const ok = await appConfirm('删除设备', '确定删除该设备？有活动 control session 时后端会拒绝。', 'btn-danger');
+  const ok = await appConfirm('删除设备', '确定删除该设备？有活动订单或占用状态时系统会拒绝。', 'btn-danger');
   if (!ok) return;
   try {
     await api(`/api/admin/devices/${id}`, {method:'DELETE'});
@@ -3187,7 +3203,7 @@ async function restartDevice(deviceKey, deviceName) {
   if (!ok) return;
   try {
     await api(`/api/admin/machines/${encodeURIComponent(deviceKey)}/restart`, {method:'POST', body:'{}'});
-    appAlert('已发送重启指令，等待客户端执行');
+    appAlert('已发送重启指令，等待设备端执行');
     await loadDevicesAdmin();
   } catch(e) { appAlert(e.message); }
 }
@@ -3205,16 +3221,16 @@ async function updateDevice(deviceKey, deviceName) {
   if (!ok) return;
   try {
     await api(`/api/admin/machines/${encodeURIComponent(deviceKey)}/update`, {method:'POST', body:'{}'});
-    appAlert('已发送更新指令，等待客户端执行');
+    appAlert('已发送更新指令，等待设备端执行');
     await loadDevicesAdmin();
   } catch(e) { appAlert(e.message); }
 }
 async function collectLog(deviceKey, deviceName) {
-  const ok = await appConfirm('回收日志', `确定回收设备 "${deviceName}" 的运行日志吗？\n\n客户端将自动上传最新的日志文件到服务器。`, 'btn-primary');
+  const ok = await appConfirm('回收日志', `确定回收设备 "${deviceName}" 的运行日志吗？\n\n设备端将自动上传最新的日志文件到服务器。`, 'btn-primary');
   if (!ok) return;
   try {
     await api(`/api/admin/machines/${encodeURIComponent(deviceKey)}/collect_log`, {method:'POST', body:'{}'});
-    appAlert('已发送日志回收指令，等待客户端上传');
+    appAlert('已发送日志回收指令，等待设备端上传');
     await loadDevicesAdmin();
   } catch(e) { appAlert(e.message); }
 }
@@ -3549,7 +3565,7 @@ async function loadEquipmentConfig() {
 function renderEquipmentConfig() {
   if (!_equipmentRows.length) { $('equipmentConfigTable').innerHTML = '<div class="empty-state">暂无装备目录</div>'; return; }
   $('equipmentConfigTable').innerHTML = `<table class="data-table"><thead><tr>
-    <th>分类</th><th>装备</th><th>价格/W</th><th>启用</th><th>客户端支持</th>
+    <th>分类</th><th>装备</th><th>价格/W</th><th>启用</th><th>设备端支持</th>
   </tr></thead><tbody>` + _equipmentRows.map((e, idx) => `<tr>
     <td>${esc(e.type_label || e.equipment_type)}</td>
     <td><b>${esc(e.equipment_name)}</b></td>
@@ -3580,7 +3596,7 @@ async function loadOrders() {
 function renderOrders(rows, target='ordersTable') {
   if (!rows.length) { $(target).innerHTML = '<div class="empty-state">暂无订单</div>'; return; }
   $(target).innerHTML = `<table class="data-table"><thead><tr>
-    <th>ID</th><th>客户</th><th>队伍码</th><th>状态</th><th>购买</th><th>剩余</th><th>开始</th><th>结束</th><th>设备/session</th><th>操作</th>
+    <th>ID</th><th>客户</th><th>队伍码</th><th>状态</th><th>购买</th><th>剩余</th><th>开始</th><th>结束</th><th>设备/控制号</th><th>操作</th>
   </tr></thead><tbody>` + rows.map(o => `<tr>
     <td>${o.id}</td><td>${esc(o.customer_username || o.customer_id)}</td><td>${esc(o.team_code || '-')}</td>
     <td>${statusBadge(o.status)}</td><td>${fmtMin(o.requested_minutes)}</td><td><b>${fmtMin(o.remaining_minutes)}</b></td>
@@ -3613,7 +3629,7 @@ async function submitAdjustOrder() {
   } catch(e) { toast(e.message); }
 }
 async function stopOrder(id) {
-  const ok = await appConfirm('停止订单', '确认向中央下发 stop_current 并停止该订单？\n本地订单会进入 stopping，等待中央事件确认。', 'btn-danger');
+  const ok = await appConfirm('停止订单', '确认停止该订单？系统会向设备下发停止指令并等待确认。', 'btn-danger');
   if (!ok) return;
   try {
     await api(`/api/admin/orders/${id}/stop`, {method:'POST', body:'{}'});
@@ -3628,7 +3644,7 @@ async function orderDetail(id) {
     <tr><th>状态</th><td>${statusBadge(o.status)}</td><th>队伍码</th><td>${esc(o.team_code || '-')}</td></tr>
     <tr><th>购买</th><td>${fmtMin(o.requested_minutes)}</td><th>剩余</th><td>${fmtMin(o.remaining_minutes)}</td></tr>
     <tr><th>开始</th><td>${fmtDate(o.started_at)}</td><th>结束</th><td>${fmtDate(o.end_at)}</td></tr>
-    <tr><th>设备</th><td>${esc(o.binding?.device_id || '-')}</td><th>Session</th><td style="font-family:monospace">${esc(o.control_session_id || '-')}</td></tr>
+    <tr><th>设备</th><td>${esc(o.binding?.device_id || '-')}</td><th>控制号</th><td style="font-family:monospace">${esc(o.control_session_id || '-')}</td></tr>
     <tr><th>本地订单号</th><td colspan="3" style="font-family:monospace">${esc(o.local_order_no)}</td></tr>
     <tr><th>失败原因</th><td colspan="3">${esc(o.fail_reason || '-')}</td></tr>
   </tbody></table>`;
@@ -3642,13 +3658,13 @@ async function loadAdmins() {
     <th>ID</th><th>用户名</th><th>角色</th><th>状态</th><th>最后登录</th><th>创建/更新</th><th>操作</th>
   </tr></thead><tbody>` + rows.map(a => {
     const encodedName = encodeURIComponent(a.username || '');
-    const roleBadge = a.role === 'owner' ? '<span class="badge badge-purple">owner</span>' : '<span class="badge badge-waiting">operator</span>';
-    const statusBadge = a.status === 'active' ? '<span class="badge badge-online">active</span>' : '<span class="badge badge-offline">disabled</span>';
+    const roleBadge = a.role === 'owner' ? '<span class="badge badge-purple">主管理员</span>' : '<span class="badge badge-waiting">操作员</span>';
+    const statusBadge = a.status === 'active' ? '<span class="badge badge-online">启用</span>' : '<span class="badge badge-offline">禁用</span>';
     const actions = IS_OWNER ? `
       <button class="btn-sm btn-gray" onclick="openResetAdminPwd(${a.id}, decodeURIComponent('${encodedName}'))">改密码</button>
-      <button class="btn-sm btn-primary" onclick="changeAdminRole(${a.id}, '${a.role === 'owner' ? 'operator' : 'owner'}')">${a.role === 'owner' ? '降为 operator' : '升为 owner'}</button>
+      <button class="btn-sm btn-primary" onclick="changeAdminRole(${a.id}, '${a.role === 'owner' ? 'operator' : 'owner'}')">${a.role === 'owner' ? '降为操作员' : '升为主管理员'}</button>
       <button class="btn-sm ${a.status === 'active' ? 'btn-amber' : 'btn-green'}" onclick="changeAdminStatus(${a.id}, '${a.status === 'active' ? 'disabled' : 'active'}')">${a.status === 'active' ? '禁用' : '启用'}</button>
-      <button class="btn-sm btn-danger" onclick="deleteAdmin(${a.id}, decodeURIComponent('${encodedName}'))">删除</button>` : '<span class="hint">仅 owner 可修改</span>';
+      <button class="btn-sm btn-danger" onclick="deleteAdmin(${a.id}, decodeURIComponent('${encodedName}'))">删除</button>` : '<span class="hint">仅主管理员可修改</span>';
     return `<tr>
       <td>${esc(a.id)}</td><td>${esc(a.username)}</td><td>${roleBadge}</td><td>${statusBadge}</td>
       <td>${fmtDate(a.last_login_at)}</td><td>${fmtDate(a.created_at)}<br><span class="hint">${fmtDate(a.updated_at)}</span></td><td>${actions}</td>
@@ -3656,7 +3672,7 @@ async function loadAdmins() {
   }).join('') + '</tbody></table>';
 }
 function openAdminModal() {
-  if (!IS_OWNER) { toast('仅 owner 可新建管理员'); return; }
+  if (!IS_OWNER) { toast('仅主管理员可新建管理员'); return; }
   $('adminNewUsername').value = '';
   $('adminNewPassword').value = '123456';
   $('adminNewRole').value = 'operator';
@@ -3675,7 +3691,7 @@ async function submitCreateAdmin() {
   } catch(e) { toast(e.message); }
 }
 function openResetAdminPwd(id, name) {
-  if (!IS_OWNER) { toast('仅 owner 可修改管理员密码'); return; }
+  if (!IS_OWNER) { toast('仅主管理员可修改管理员密码'); return; }
   $('adminPwdId').value = id;
   $('adminPwdUsername').value = name || id;
   $('adminPwdNew').value = '123456';
@@ -3688,13 +3704,15 @@ async function submitResetAdminPwd() {
   } catch(e) { toast(e.message); }
 }
 async function changeAdminRole(id, role) {
-  const ok = await appConfirm('修改管理员角色', `确认将管理员 #${id} 修改为 ${role}？`, role === 'owner' ? 'btn-primary' : 'btn-amber');
+  const roleLabel = role === 'owner' ? '主管理员' : '操作员';
+  const ok = await appConfirm('修改管理员角色', `确认将管理员 #${id} 修改为 ${roleLabel}？`, role === 'owner' ? 'btn-primary' : 'btn-amber');
   if (!ok) return;
   try { await api('/api/admin/admins/' + id + '/role', {method:'PUT', body:JSON.stringify({role})}); toast('管理员角色已更新'); await loadAdmins(); await loadAuditLogs(); }
   catch(e) { toast(e.message); }
 }
 async function changeAdminStatus(id, status) {
-  const ok = await appConfirm('修改管理员状态', `确认将管理员 #${id} 修改为 ${status}？`, status === 'active' ? 'btn-green' : 'btn-amber');
+  const statusLabel = status === 'active' ? '启用' : '禁用';
+  const ok = await appConfirm('修改管理员状态', `确认将管理员 #${id} 修改为 ${statusLabel}？`, status === 'active' ? 'btn-green' : 'btn-amber');
   if (!ok) return;
   try { await api('/api/admin/admins/' + id + '/status', {method:'PUT', body:JSON.stringify({status})}); toast('管理员状态已更新'); await loadAdmins(); await loadAuditLogs(); }
   catch(e) { toast(e.message); }
@@ -3854,4 +3872,11 @@ loadAll().then(loadSettings).catch(e => toast(e.message));
 </script>
 </body>
 </html>"""
-    return template.replace("__SYSTEM_NAME__", system_name).replace("__ADMIN__", _escape(admin.get("username"))).replace("__ROLE__", _escape(admin.get("role")))
+    role = str(admin.get("role") or "")
+    role_label = "主管理员" if role == "owner" else ("操作员" if role == "operator" else role)
+    return (
+        template.replace("__SYSTEM_NAME__", system_name)
+        .replace("__ADMIN__", _escape(admin.get("username")))
+        .replace("__ROLE_LABEL__", _escape(role_label))
+        .replace("__ROLE__", _escape(role))
+    )

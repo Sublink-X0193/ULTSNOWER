@@ -756,7 +756,7 @@ def test_admin_settings_legacy_ui_and_post_compatibility(app_and_bridge):
     html = client.get("/merchant-admin").text
     assert '登录页与注册页显示的系统名称，留空时默认使用"管理员用户名前3位+电竞"' in html
     assert "自动分配采用排钟逻辑" in html
-    assert "下雪反作弊系统 XX-ACE（订单反白嫖）" in html
+    assert "订单异常结单检测" in html
     assert 'id="settingPrivacyMode"' in html
     assert 'id="settingMaintenanceMode"' in html
     assert 'id="nightTimeRangeField"' in html
@@ -1200,8 +1200,8 @@ def test_setup_wizard_skipped_by_default_for_testing(tmp_path):
     assert status["setup_enforced"] is False
     assert status["setup_required"] is False
     setup_html = client.get("/setup").text
-    assert "首次配置 Bridge API Key / 全局设置" in setup_html
-    assert "测试期跳过 API Key" in setup_html
+    assert "首次配置服务接入 / 全局设置" in setup_html
+    assert "暂不填写接入信息" in setup_html
     saved = client.post(
         "/api/setup/bridge",
         json={
@@ -1231,11 +1231,11 @@ def test_setup_wizard_bridge_config_requires_admin_password_when_enforced(tmp_pa
     assert login.status_code == 303
     assert login.headers["location"] == "/setup"
     setup_html = client.get("/setup").text
-    assert "首次配置 Bridge API Key / 全局设置" in setup_html
+    assert "首次配置服务接入 / 全局设置" in setup_html
     assert "前台名称显示" in setup_html
-    assert "中央 Bridge 地址 / API Key 填入地址" in setup_html
+    assert "服务接入信息" in setup_html
     assert "本地管理员账户创建" in setup_html
-    assert "https://bridge.example.com" in setup_html
+    assert "https://service.example.com" in setup_html
     bad = client.post(
         "/api/setup/bridge",
         json={"admin_username": "owner", "admin_password": "bad", "bridge_base_url": "https://bridge.example.com", "bridge_merchant_key": "mk_live", "bridge_merchant_secret": "secret-live"},
