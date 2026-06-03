@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import math
+from html import escape as html_escape
+from html.parser import HTMLParser
 import secrets
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 from .bridge_client import BridgeClientError
@@ -60,6 +63,76 @@ V9_LOADOUT_TYPE_LABELS = {
     "pistol": "手枪装备",
     "backpack": "背包装备",
 }
+
+
+_ALLOWED_NOTICE_TAGS = {"b", "strong", "i", "em", "u", "p", "br", "ul", "ol", "li", "a", "div", "span"}
+_VOID_NOTICE_TAGS = {"br"}
+
+
+def normalize_public_http_url(value: Any, *, max_len: int = 300) -> str:
+    url = str(value or "").strip()
+    if not url:
+        return ""
+    if len(url) > max_len:
+        raise MerchantError("bad_setting", "global_radar_url 最多 300 字")
+    parsed = urlparse(url)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        raise MerchantError("bad_setting", "global_radar_url 只允许 http:// 或 https:// 网址")
+    return url
+
+
+def _notice_href(value: Any) -> str:
+    href = str(value or "").strip()
+    if not href or len(href) > 500:
+        return ""
+    parsed = urlparse(href)
+    if parsed.scheme.lower() in {"http", "https"} and parsed.netloc:
+        return href
+    return ""
+
+
+class _NoticeSanitizer(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.out: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag_l = tag.lower()
+        if tag_l not in _ALLOWED_NOTICE_TAGS:
+            return
+        if tag_l == "a":
+            href = ""
+            for name, value in attrs:
+                if name.lower() == "href":
+                    href = _notice_href(value)
+                    break
+            if href:
+                self.out.append(f'<a href="{html_escape(href, quote=True)}" target="_blank" rel="noopener noreferrer">')
+            else:
+                self.out.append("<a>")
+            return
+        self.out.append(f"<{tag_l}>")
+
+    def handle_endtag(self, tag: str) -> None:
+        tag_l = tag.lower()
+        if tag_l in _ALLOWED_NOTICE_TAGS and tag_l not in _VOID_NOTICE_TAGS:
+            self.out.append(f"</{tag_l}>")
+
+    def handle_data(self, data: str) -> None:
+        self.out.append(html_escape(data, quote=False))
+
+
+def sanitize_notice_html(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    parser = _NoticeSanitizer()
+    try:
+        parser.feed(raw)
+        parser.close()
+        return "".join(parser.out)
+    except Exception:
+        return html_escape(raw, quote=False)
 
 
 class MerchantError(RuntimeError):
@@ -1753,6 +1826,52 @@ class MerchantService:
                 con.rollback()
                 raise
 
+    def configure_initial_owner_admin(self, *, username: str, password: str) -> dict[str, Any]:
+        """Create or replace the bootstrap owner during first-run setup.
+
+        create_app still seeds a local default owner so the app remains usable
+        in development and tests. In enforced first-run setup, the setup page is
+        the user's chance to replace that bootstrap account with their real
+        local owner account before the site opens.
+        """
+        username = str(username or "").strip()
+        if not username or len(username) > 64:
+            raise MerchantError("bad_username", "管理员用户名不合法")
+        if len(str(password or "")) < 6:
+            raise MerchantError("bad_password", "管理员密码至少 6 位")
+        now_s = iso()
+        with self.db.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            try:
+                row = con.execute("SELECT * FROM merchant_admins WHERE role='owner' ORDER BY id LIMIT 1").fetchone()
+                if not row:
+                    row = con.execute("SELECT * FROM merchant_admins ORDER BY id LIMIT 1").fetchone()
+                existing = con.execute("SELECT * FROM merchant_admins WHERE username=?", (username,)).fetchone()
+                if existing and row and int(existing["id"]) != int(row["id"]):
+                    raise MerchantError("username_exists", "管理员用户名已存在", 409)
+                if row:
+                    admin_id = int(row["id"])
+                    con.execute(
+                        "UPDATE merchant_admins SET username=?,password_hash=?,role='owner',status='active',updated_at=? WHERE id=?",
+                        (username, hash_password(password), now_s, admin_id),
+                    )
+                else:
+                    cur = con.execute(
+                        "INSERT INTO merchant_admins(username,password_hash,role,status,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                        (username, hash_password(password), "owner", "active", now_s, now_s),
+                    )
+                    admin_id = int(cur.lastrowid)
+                fresh = con.execute("SELECT * FROM merchant_admins WHERE id=?", (admin_id,)).fetchone()
+                self._log_admin_action_locked(con, self._admin_view(fresh), "initial_owner_configure", "admin", admin_id, {"username": username})
+                con.commit()
+                return self._admin_view(fresh)
+            except MerchantError:
+                con.rollback()
+                raise
+            except Exception:
+                con.rollback()
+                raise
+
     def authenticate_admin(self, username: str, password: str) -> dict[str, Any]:
         username = str(username or "").strip()
         with self.db.connect() as con:
@@ -1991,6 +2110,11 @@ class MerchantService:
                 out[key] = default
         for key in ("maintenance_message", "announcement_text", "system_name", "night_start_time", "night_end_time", "global_radar_url"):
             out[key] = str(out.get(key) or DEFAULT_SETTINGS.get(key) or "")
+        out["announcement_text"] = sanitize_notice_html(out.get("announcement_text"))
+        try:
+            out["global_radar_url"] = normalize_public_http_url(out.get("global_radar_url")) if out.get("global_radar_url") else ""
+        except MerchantError:
+            out["global_radar_url"] = ""
         out["system_name"] = out["system_name"] or "SNOW 自助下单"
         if not isinstance(out.get("equipment_config"), list):
             out["equipment_config"] = []
@@ -2013,8 +2137,10 @@ class MerchantService:
                 text = str(values.get(key) or "").strip()
                 if len(text) > 4000:
                     raise MerchantError("bad_announcement", "公告最多 4000 字")
-                sanitized[key] = text
-            elif key in {"maintenance_message", "global_radar_url", "night_start_time", "night_end_time"}:
+                sanitized[key] = sanitize_notice_html(text)
+            elif key == "global_radar_url":
+                sanitized[key] = normalize_public_http_url(values.get(key)) if values.get(key) else ""
+            elif key in {"maintenance_message", "night_start_time", "night_end_time"}:
                 text = str(values.get(key) or "").strip()
                 if len(text) > 300:
                     raise MerchantError("bad_setting", f"{key} 最多 300 字")

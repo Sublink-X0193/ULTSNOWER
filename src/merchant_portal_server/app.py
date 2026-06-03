@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import secrets
 import string
 import time as time_mod
@@ -111,6 +112,22 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
             return False
         return parsed.scheme == request.url.scheme and parsed.netloc == request.url.netloc
 
+    def internal_worker_request_allowed(request: Request) -> bool:
+        token = getattr(settings, "internal_worker_token", "") or ""
+        if token:
+            provided = request.headers.get("X-Internal-Token") or request.headers.get("X-Worker-Token") or ""
+            if hmac.compare_digest(str(provided), str(token)):
+                return True
+        host = request.client.host if request.client else ""
+        # TestClient uses a synthetic client host; real deployments should be
+        # limited to loopback unless they configure X-Internal-Token above.
+        if host in {"testclient", "testserver", "localhost"}:
+            return True
+        try:
+            return ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            return False
+
     @app.middleware("http")
     async def hardening_middleware(request: Request, call_next):
         path = request.url.path
@@ -118,6 +135,8 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
             if path.startswith("/api/") or request.method.upper() != "GET":
                 return json_fail("setup_required", "请先完成 Bridge API Key 首次配置", 428)
             return RedirectResponse("/setup", status_code=303)
+        if path.startswith("/internal/") and not internal_worker_request_allowed(request):
+            return json_fail("forbidden_internal_endpoint", "内部任务接口只允许本机或携带内部令牌访问", 403)
         if request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"} and (path.startswith("/api/admin/") or path.startswith("/merchant-admin") or path == "/api/setup/bridge"):
             if not same_origin_request(request):
                 return json_fail("bad_origin", "请求来源不可信", 403)
@@ -130,6 +149,11 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("Referrer-Policy", "same-origin")
         response.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+        content_type = response.headers.get("content-type", "")
+        if request.method.upper() == "GET" and ("text/html" in content_type or path in {"/", "/login", "/register", "/merchant-admin", "/merchant-admin/login", "/setup"}):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
         return response
 
     @app.get("/favicon.ico", include_in_schema=False)
@@ -199,6 +223,25 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
             if v in {"0", "false", "no", "off", "n", ""}:
                 return False
         return bool(value)
+
+    def body_int(value: Any, *, default: int = 0, name: str = "参数") -> int:
+        if value in (None, ""):
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            raise MerchantError("bad_number", f"{name} 必须是整数", 400)
+
+    def body_first_int(body: dict[str, Any], keys: tuple[str, ...], *, default: int = 0, name: str = "参数") -> int:
+        for key in keys:
+            if key in body and body.get(key) not in (None, ""):
+                return body_int(body.get(key), default=default, name=name)
+        return default
+
+    def optional_body_int(body: dict[str, Any], key: str, *, name: str | None = None) -> int | None:
+        if key not in body:
+            return None
+        return body_int(body.get(key), default=0, name=name or key)
 
     def normalize_admin_settings_payload(values: dict[str, Any]) -> dict[str, Any]:
         payload = dict(values or {})
@@ -330,7 +373,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     def admin_login_page() -> HTMLResponse:
         if setup_required_effective():
             return RedirectResponse("/setup", status_code=303)  # type: ignore[return-value]
-        return HTMLResponse(_layout("商户后台登录", _form("/merchant-admin/login", [("username", "管理员"), ("password", "密码", "password")], "登录")))
+        return HTMLResponse(_layout("管理后台登录", _form("/merchant-admin/login", [("username", "管理员"), ("password", "密码", "password")], "登录")))
 
     @app.post("/merchant-admin/login")
     def admin_login_form(username: str = Form(...), password: str = Form(...)) -> RedirectResponse:
@@ -389,9 +432,15 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     def api_setup_bridge(request: Request, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
         admin = maybe_admin(request)
         if not admin:
-            # First-run setup is still guarded by the local admin password so a
-            # random LAN visitor cannot bind the merchant server to their key.
-            admin = service.authenticate_admin(body.get("admin_username") or settings.default_admin_username, body.get("admin_password") or "")
+            if setup_required_effective():
+                admin = service.configure_initial_owner_admin(
+                    username=body.get("admin_username") or settings.default_admin_username,
+                    password=body.get("admin_password") or "",
+                )
+            else:
+                # After first-run setup, setup writes are guarded by the local
+                # admin password so a visitor cannot rebind Bridge credentials.
+                admin = service.authenticate_admin(body.get("admin_username") or settings.default_admin_username, body.get("admin_password") or "")
         require_owner_admin(admin)
         raw_settings_payload = body.get("settings") if isinstance(body.get("settings"), dict) else body
         settings_payload = normalize_admin_settings_payload(raw_settings_payload)
@@ -414,7 +463,13 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
                         service.bridge.close()
                 except Exception:
                     pass
-                new_bridge = BridgeClient(cfg["bridge_base_url"], cfg["bridge_merchant_key"], merchant_secret)
+                new_bridge = BridgeClient(
+                    cfg["bridge_base_url"],
+                    cfg["bridge_merchant_key"],
+                    merchant_secret,
+                    api_prefix=settings.bridge_api_prefix,
+                    auth_header_prefix=settings.bridge_auth_header_prefix,
+                )
                 service.bridge = new_bridge
                 app.state.bridge = new_bridge
         msg = "首次配置已保存" if not has_bridge_credentials else "全局设置与 Bridge API Key 已保存"
@@ -548,8 +603,8 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
             mode = "machine"
         available_minutes = int((fresh.get("balance_absolute_minutes") if mode == "absolute" else fresh.get("balance_machine_minutes")) or 0)
         available_rounds = int((fresh.get("balance_absolute_rounds") if mode == "absolute" else fresh.get("balance_machine_rounds")) or 0)
-        minutes = int(body.get("run_minutes") or body.get("minutes") or body.get("requested_minutes") or available_minutes)
-        rounds = int(body.get("run_rounds") or body.get("rounds") or body.get("max_rounds") or available_rounds)
+        minutes = body_first_int(body, ("run_minutes", "minutes", "requested_minutes"), default=available_minutes, name="分钟数")
+        rounds = body_first_int(body, ("run_rounds", "rounds", "max_rounds"), default=available_rounds, name="战损局数")
         quality = "secret" if mode == "absolute" else "standard"
         team_code = body.get("boss_name") or body.get("team_code") or ""
         result = service.place_order(
@@ -635,8 +690,8 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     def api_order(request: Request, body: dict[str, Any] = Body(...), customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
         result = service.place_order(
             customer["id"],
-            requested_minutes=int(body.get("requested_minutes") or 0),
-            requested_rounds=int(body.get("requested_rounds") or body.get("rounds") or 0),
+            requested_minutes=body_first_int(body, ("requested_minutes",), default=0, name="购买分钟数"),
+            requested_rounds=body_first_int(body, ("requested_rounds", "rounds"), default=0, name="战损局数"),
             team_code=body.get("team_code") or "",
             quality=body.get("quality") or "standard",
             idempotency_key=request.headers.get("X-Idempotency-Key"),
@@ -713,18 +768,19 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     @app.post("/api/admin/cards/generate")
     def api_admin_cards_generate(body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
         require_owner_admin(admin)
-        minutes = int(body.get("minutes") or 0)
+        minutes = body_int(body.get("minutes"), default=0, name="卡密分钟数")
         if minutes <= 0:
-            minutes = int(body.get("hours") or 0) * 60 + int(body.get("days") or 0) * 24 * 60
+            minutes = body_int(body.get("hours"), default=0, name="小时数") * 60 + body_int(body.get("days"), default=0, name="天数") * 24 * 60
+        rounds = body_first_int(body, ("rounds", "absolute_rounds"), default=0, name="战损局数")
         cards = service.generate_recharge_cards(
-            count=int(body.get("count") or 1),
+            count=body_int(body.get("count"), default=1, name="生成数量"),
             minutes=minutes,
-            rounds=int(body.get("rounds") or body.get("absolute_rounds") or 0),
+            rounds=rounds,
             card_type=body.get("card_type") or "normal",
             mode=body.get("mode") or "machine",
-            night_coin_loss=int(body.get("night_coin_loss") or 0),
+            night_coin_loss=body_int(body.get("night_coin_loss"), default=0, name="夜间亏币"),
         )
-        service.log_admin_action(admin, "card_generate", "recharge_card", "batch", {"count": len(cards), "minutes": minutes, "rounds": int(body.get("rounds") or body.get("absolute_rounds") or 0), "card_type": body.get("card_type") or "normal", "mode": body.get("mode") or "machine"})
+        service.log_admin_action(admin, "card_generate", "recharge_card", "batch", {"count": len(cards), "minutes": minutes, "rounds": rounds, "card_type": body.get("card_type") or "normal", "mode": body.get("mode") or "machine"})
         return json_ok(msg="生成成功", cards=cards)
 
     @app.delete("/api/admin/cards/{code}")
@@ -765,8 +821,8 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         customer = service.admin_create_customer(
             username=body.get("username") or "",
             password=body.get("password") or "123456",
-            balance_minutes=int(body.get("balance_minutes") or 0),
-            balance_rounds=int(body.get("balance_rounds") or 0),
+            balance_minutes=body_int(body.get("balance_minutes"), default=0, name="机密分钟余额"),
+            balance_rounds=body_int(body.get("balance_rounds"), default=0, name="机密战损余额"),
             status=body.get("status") or "active",
         )
         service.log_admin_action(admin, "customer_create", "customer", customer["id"], {"username": customer["username"], "status": customer.get("status")})
@@ -777,18 +833,18 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         require_owner_admin(admin)
         customer = service.admin_update_customer_balance(
             customer_id,
-            balance_minutes=body.get("balance_minutes") if "balance_minutes" in body else None,
-            balance_rounds=body.get("balance_rounds") if "balance_rounds" in body else None,
-            balance_machine_minutes=body.get("balance_machine_minutes") if "balance_machine_minutes" in body else None,
-            balance_machine_rounds=body.get("balance_machine_rounds") if "balance_machine_rounds" in body else None,
-            balance_absolute_minutes=body.get("balance_absolute_minutes") if "balance_absolute_minutes" in body else None,
-            balance_absolute_rounds=body.get("balance_absolute_rounds") if "balance_absolute_rounds" in body else None,
-            delta_minutes=body.get("delta_minutes") if "delta_minutes" in body else None,
-            delta_rounds=body.get("delta_rounds") if "delta_rounds" in body else None,
-            delta_machine_minutes=body.get("delta_machine_minutes") if "delta_machine_minutes" in body else None,
-            delta_machine_rounds=body.get("delta_machine_rounds") if "delta_machine_rounds" in body else None,
-            delta_absolute_minutes=body.get("delta_absolute_minutes") if "delta_absolute_minutes" in body else None,
-            delta_absolute_rounds=body.get("delta_absolute_rounds") if "delta_absolute_rounds" in body else None,
+            balance_minutes=optional_body_int(body, "balance_minutes", name="机密分钟余额"),
+            balance_rounds=optional_body_int(body, "balance_rounds", name="机密战损余额"),
+            balance_machine_minutes=optional_body_int(body, "balance_machine_minutes", name="机密分钟余额"),
+            balance_machine_rounds=optional_body_int(body, "balance_machine_rounds", name="机密战损余额"),
+            balance_absolute_minutes=optional_body_int(body, "balance_absolute_minutes", name="绝密分钟余额"),
+            balance_absolute_rounds=optional_body_int(body, "balance_absolute_rounds", name="绝密战损余额"),
+            delta_minutes=optional_body_int(body, "delta_minutes", name="机密分钟增量"),
+            delta_rounds=optional_body_int(body, "delta_rounds", name="机密战损增量"),
+            delta_machine_minutes=optional_body_int(body, "delta_machine_minutes", name="机密分钟增量"),
+            delta_machine_rounds=optional_body_int(body, "delta_machine_rounds", name="机密战损增量"),
+            delta_absolute_minutes=optional_body_int(body, "delta_absolute_minutes", name="绝密分钟增量"),
+            delta_absolute_rounds=optional_body_int(body, "delta_absolute_rounds", name="绝密战损增量"),
         )
         service.log_admin_action(admin, "customer_balance_update", "customer", customer_id, {k: body.get(k) for k in sorted(body.keys()) if k != "password"})
         return json_ok(customer=customer)
@@ -940,7 +996,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     @app.post("/api/admin/manual-order")
     def api_admin_manual_order(request: Request, body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
         require_owner_admin(admin)
-        device_id = int(body.get("device_id") or 0)
+        device_id = body_int(body.get("device_id"), default=0, name="设备ID")
         mode = str(body.get("selected_mode") or body.get("mode") or "").strip().lower()
         if not mode and device_id:
             try:
@@ -956,9 +1012,9 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         order = service.admin_manual_order(
             admin,
             device_id=device_id,
-            requested_minutes=int(body.get("run_minutes") or body.get("requested_minutes") or body.get("minutes") or 0),
-            requested_rounds=int(body.get("run_rounds") or body.get("rounds") or body.get("max_rounds") or 0),
-            max_coin_loss=int(body.get("max_coin_loss") or 0),
+            requested_minutes=body_first_int(body, ("run_minutes", "requested_minutes", "minutes"), default=0, name="手动下单分钟数"),
+            requested_rounds=body_first_int(body, ("run_rounds", "rounds", "max_rounds"), default=0, name="限制局数"),
+            max_coin_loss=body_int(body.get("max_coin_loss"), default=0, name="限制亏币"),
             team_code=body.get("boss_name") or body.get("team_code") or "",
             quality=quality,
             loadout=service._manual_loadout_from_payload(body),
@@ -1014,7 +1070,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     @app.post("/api/admin/orders/{order_id}/add-time")
     def api_admin_order_add_time(order_id: int, body: dict[str, Any] = Body(...), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
         require_owner_admin(admin)
-        add_minutes = int(body.get("add_minutes") or 0)
+        add_minutes = body_int(body.get("add_minutes"), default=0, name="调整分钟")
         order = service.admin_adjust_order_time(order_id, add_minutes=add_minutes)
         service.log_admin_action(admin, "order_time_adjust", "order", order_id, {"add_minutes": add_minutes})
         return json_ok(order=order)
@@ -1022,10 +1078,10 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     @app.post("/api/admin/add-time/{order_id}")
     def api_admin_add_time_legacy(order_id: int, body: dict[str, Any] = Body(default_factory=dict), admin: dict[str, Any] = Depends(current_admin)) -> dict[str, Any]:
         require_owner_admin(admin)
-        add_minutes = int(body.get("add_minutes") or 0)
+        add_minutes = body_int(body.get("add_minutes"), default=0, name="调整分钟")
         if not add_minutes:
             sign = -1 if str(body.get("op") or body.get("operation") or "").lower() in {"sub", "minus", "subtract"} else 1
-            add_minutes = sign * (int(body.get("hours") or 0) * 60 + int(body.get("minutes") or body.get("add_minutes_abs") or 0))
+            add_minutes = sign * (body_int(body.get("hours"), default=0, name="调整小时") * 60 + body_first_int(body, ("minutes", "add_minutes_abs"), default=0, name="调整分钟"))
         order = service.admin_adjust_order_time(order_id, add_minutes=add_minutes)
         service.log_admin_action(admin, "order_time_adjust", "order", order_id, {"add_minutes": add_minutes})
         return json_ok(order=order, msg="订单时长已调整")
@@ -1098,10 +1154,23 @@ def _setup_html(cfg: dict[str, Any], *, require_admin_password: bool = True) -> 
         truth = value is True or str(value).strip().lower() in {"1", "true", "yes", "on", "y"}
         return "checked" if truth else ""
 
-    admin_fields = """
-      <label>管理员用户名<input id="adminUsername" value="admin" autocomplete="username"></label>
-      <label>管理员密码<input id="adminPassword" type="password" autocomplete="current-password" placeholder="输入本地管理员密码"></label>
-    """ if require_admin_password else "<div class='hint'>已登录管理员，会直接保存到本地配置。</div>"
+    first_run_admin_create = bool(require_admin_password and cfg.get("setup_required_raw"))
+    if first_run_admin_create:
+        admin_title = "本地管理员账户创建"
+        admin_fields = """
+          <label>管理员用户名<input id="adminUsername" value="admin" autocomplete="username" placeholder="设置本地 owner 管理员用户名"></label>
+          <label>管理员密码<input id="adminPassword" type="password" autocomplete="new-password" placeholder="设置本地管理员密码，至少 6 位"></label>
+          <div class="hint">首次配置会创建/替换本地 owner 管理员账户；后续进入商户后台使用该账户登录。</div>
+        """
+    elif require_admin_password:
+        admin_title = "本地管理员验证"
+        admin_fields = """
+          <label>管理员用户名<input id="adminUsername" value="admin" autocomplete="username"></label>
+          <label>管理员密码<input id="adminPassword" type="password" autocomplete="current-password" placeholder="输入本地管理员密码"></label>
+        """
+    else:
+        admin_title = "本地管理员账户"
+        admin_fields = "<div class='hint'>已登录管理员，会直接保存到本地配置。</div>"
     skip_button = "" if cfg.get("setup_enforced") else """<button class="btn-secondary" onclick="location.href='/merchant-admin/login'">测试期跳过 API Key，进入后台登录</button>"""
     setup_note = "正式模式：必须填入 Bridge API Key 后才能进入业务页面。" if cfg.get("setup_enforced") else "测试期间：当前不强制填写 API Key；可先保存全局设置，Bridge Key/Secret 留空。"
     return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1122,17 +1191,17 @@ def _setup_html(cfg: dict[str, Any], *, require_admin_password: bool = True) -> 
       <div class="banner">{_escape(setup_note)}</div>
       <div id="msg"></div>
       <div class="section">
-        <h2>本地管理员验证</h2>
+        <h2>{admin_title}</h2>
         {admin_fields}
       </div>
       <div class="section">
         <h2>中央 Bridge / API Key 地址</h2>
         <div class="grid">
-          <div class="full"><label>中央 Bridge 地址 / API Key 填入地址<input id="bridgeBaseUrl" value="{_escape(cfg.get("bridge_base_url") or "http://127.0.0.1:8010")}" placeholder="http://127.0.0.1:8010"></label></div>
+          <div class="full"><label>中央 Bridge 地址 / API Key 填入地址<input id="bridgeBaseUrl" value="{_escape(cfg.get("bridge_base_url") or "http://127.0.0.1:8010")}" placeholder="https://bridge.example.com 或 http://127.0.0.1:8010"></label></div>
           <div><label>Merchant Key<input id="bridgeKey" value="{_escape(cfg.get("bridge_merchant_key") if cfg.get("bridge_merchant_key") != "mk_test" else "")}" placeholder="mk_xxx"></label></div>
           <div><label>Merchant Secret<input id="bridgeSecret" type="password" placeholder="中央生成的 Secret；测试期可留空"></label></div>
         </div>
-        <div class="hint">Secret 保存后不会在界面回显；测试期留空时不会更新 Bridge 配置。</div>
+        <div class="hint">Bridge 地址支持 HTTPS 域名，例如 https://bridge.example.com；也支持本地 http://127.0.0.1:8010。Secret 保存后不会在界面回显；测试期留空时不会更新 Bridge 配置。</div>
       </div>
       <div class="section">
         <h2>全局设置</h2>
@@ -1233,7 +1302,7 @@ def _legacy_system_name(settings: dict[str, Any]) -> str:
 def _legacy_auth_html(name: str, settings: dict[str, Any]) -> str:
     system_name = _legacy_system_name(settings)
     html = _legacy_template(name)
-    html = html.replace("粥粥宇电竞", system_name).replace("瑶光电竞", system_name)
+    html = html.replace("__SYSTEM_NAME__", system_name).replace("粥粥宇电竞", system_name).replace("瑶光电竞", system_name)
     html = html.replace("const tenantId = 5782;", "const tenantId = 0;")
     html = html.replace("const tenantId = 0;", "const tenantId = 0;")
     return html
@@ -1752,7 +1821,7 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>__SYSTEM_NAME__ 商户后台</title>
+  <title>__SYSTEM_NAME__ - 管理后台</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; background: #f0f2f5; color: #1f2937; min-height: 100vh; }
@@ -1860,7 +1929,7 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
 </head>
 <body>
   <div class="topbar">
-    <div class="topbar-logo">__SYSTEM_NAME__ · 商户管理后台</div>
+    <div class="topbar-logo">__SYSTEM_NAME__ · 管理后台</div>
     <div class="topbar-right">
       <span>__ADMIN__ / __ROLE__</span>
       <button class="btn-sm btn-gray" onclick="location.href='/'">客户首页</button>

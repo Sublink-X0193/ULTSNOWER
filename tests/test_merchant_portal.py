@@ -766,7 +766,7 @@ def test_admin_settings_legacy_ui_and_post_compatibility(app_and_bridge):
     renamed = client.post("/api/admin/settings", json={"system_name": "七元电竞"})
     assert renamed.status_code == 200
     admin_html = client.get("/merchant-admin").text
-    assert "七元电竞 · 商户管理后台" in admin_html
+    assert "七元电竞 · 管理后台" in admin_html
     assert "SNOW 商户服务器 · 管理后台" not in admin_html
 
 
@@ -1133,17 +1133,20 @@ def test_setup_wizard_bridge_config_requires_admin_password_when_enforced(tmp_pa
     assert "首次配置 Bridge API Key / 全局设置" in setup_html
     assert "前台名称显示" in setup_html
     assert "中央 Bridge 地址 / API Key 填入地址" in setup_html
+    assert "本地管理员账户创建" in setup_html
+    assert "https://bridge.example.com" in setup_html
     bad = client.post(
         "/api/setup/bridge",
-        json={"admin_username": "admin", "admin_password": "bad", "bridge_base_url": "http://127.0.0.1:8010", "bridge_merchant_key": "mk_live", "bridge_merchant_secret": "secret-live"},
+        json={"admin_username": "owner", "admin_password": "bad", "bridge_base_url": "https://bridge.example.com", "bridge_merchant_key": "mk_live", "bridge_merchant_secret": "secret-live"},
     )
-    assert bad.status_code == 401
+    assert bad.status_code == 400
+    assert bad.json()["error"] == "bad_password"
     ok = client.post(
         "/api/setup/bridge",
         json={
-            "admin_username": "admin",
-            "admin_password": "admin123456",
-            "bridge_base_url": "http://127.0.0.1:8010",
+            "admin_username": "owner",
+            "admin_password": "owner123456",
+            "bridge_base_url": "https://bridge.example.com",
             "bridge_merchant_key": "mk_live",
             "bridge_merchant_secret": "secret-live",
             "settings": {"system_name": "七元电竞", "maintenance_mode_enabled": True},
@@ -1153,7 +1156,9 @@ def test_setup_wizard_bridge_config_requires_admin_password_when_enforced(tmp_pa
     status = client.get("/api/setup/status").json()
     assert status["configured"] is True
     assert status["setup_required"] is False
+    assert status["bridge_base_url"] == "https://bridge.example.com"
     assert status["bridge_merchant_secret_set"] is True
+    assert client.post("/api/admin/login", json={"username": "owner", "password": "owner123456"}).status_code == 200
     public_settings = client.get("/api/public/settings").json()["settings"]
     assert public_settings["system_name"] == "七元电竞"
     assert public_settings["maintenance_mode_enabled"] is True

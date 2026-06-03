@@ -80,6 +80,7 @@ python -m pytest -q
 - `POST /internal/workers/order-expire` 本地到期订单主动 stop。
 - `POST /internal/workers/session-renew` 续约 control session。
 - `POST /internal/workers/recover` 重启恢复：查 session state + events cursor 补偿。
+  - `/internal/*` 默认只允许本机调用；跨主机调度需设置 `MERCHANT_INTERNAL_WORKER_TOKEN` 并请求头携带 `X-Internal-Token`。
 - `/merchant-admin/login` 商户管理员登录。
 - `/merchant-admin` 商户后台配置页：
   - 隐私模式：客户侧隐藏队伍码和 control session 细节，不暴露 fencing token。
@@ -111,6 +112,8 @@ python -m pytest -q
 ```text
 MERCHANT_ADMIN_USERNAME=admin
 MERCHANT_ADMIN_PASSWORD=admin123456
+# 可选：允许非本机 cron/调度器调用 /internal/workers/*
+MERCHANT_INTERNAL_WORKER_TOKEN=change-me-long-random-token
 ```
 
 生产部署前请务必改掉默认密码。

@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
     <link rel="apple-touch-icon" href="/static/favicon.svg">
-    <title>瑶光电竞自助下单 - 客户中心</title>
+    <title>__SYSTEM_NAME__自助下单 - 客户中心</title>
     <style>
         * {
             box-sizing: border-box;
@@ -1385,7 +1385,7 @@
     <!-- 顶部栏 -->
     <div class="topbar">
         <div class="topbar-left">
-            <span class="topbar-logo">⚡ 瑶光电竞自助下单</span>
+            <span class="topbar-logo">⚡ __SYSTEM_NAME__自助下单</span>
         </div>
         <div class="topbar-right">
             <div class="balance-box">
@@ -1717,6 +1717,20 @@
             if (h > 0 && min > 0) return `${h}时${min}分`;
             if (h > 0) return `${h}时0分`;
             return `${min}分钟`;
+        }
+
+        function escHtml(v) {
+            return String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        }
+
+        function safeHttpUrl(v) {
+            const s = String(v == null ? '' : v).trim();
+            if (!s) return '';
+            try {
+                const u = new URL(s, window.location.origin);
+                if (u.protocol === 'http:' || u.protocol === 'https:') return s;
+            } catch (e) { }
+            return '';
         }
 
         // ===== 应用内提示弹窗（替代浏览器 alert/confirm）=====
@@ -2131,15 +2145,15 @@
                         const remainingRounds = Math.max(0, runRounds - consumedRounds);
                         parts.push(`<span class="device-tag" style="background:#fee2e2;color:#b91c1c;">剩余战损 ${remainingRounds}/${runRounds}</span>`);
                     }
-                    if (dev.harvard) parts.push(`<span class="device-tag" style="background:#fef3c7;color:#92400e;">哈币: ${dev.harvard}</span>`);
-                    if (dev.spectate_boss) parts.push(`<span class="device-tag" style="background:#e0e7ff;color:#3730a3;">老板: ${dev.spectate_boss}</span>`);
+                    if (dev.harvard) parts.push(`<span class="device-tag" style="background:#fef3c7;color:#92400e;">哈币: ${escHtml(dev.harvard)}</span>`);
+                    if (dev.spectate_boss) parts.push(`<span class="device-tag" style="background:#e0e7ff;color:#3730a3;">老板: ${escHtml(dev.spectate_boss)}</span>`);
                     if (parts.length) extraInfo = parts.join('');
                 }
 
                 card.innerHTML = `
                     <div class="device-header">
-                        <span class="device-name">${dev.name}</span>
-                        <span><span class="device-status ${statusBadgeClass}">${statusLabel}</span>${mineTag}</span>
+                        <span class="device-name">${escHtml(dev.name)}</span>
+                        <span><span class="device-status ${statusBadgeClass}">${escHtml(statusLabel)}</span>${mineTag}</span>
                     </div>
                     <div class="device-info">
                         ${modeTag}
@@ -2565,7 +2579,7 @@
             selectedDevice = dev;
             const modeLabel = dev.mode === 'machine' ? '机密' : (dev.mode === 'hybrid' ? '混合' : '绝密');
             document.getElementById('orderDeviceInfo').innerHTML =
-                `设备: <b>${dev.name}</b> · 模式: <b>${modeLabel}</b>`;
+                `设备: <b>${escHtml(dev.name)}</b> · 模式: <b>${escHtml(modeLabel)}</b>`;
 
             const hybridModeSection = document.getElementById('hybridModeSection');
             if (dev.mode === 'hybrid') {
@@ -2847,15 +2861,15 @@
                     }
 
                     html += `<tr>
-                        <td>${o.id}</td>
-                        <td>${o.device_name || '--'}</td>
-                        <td>${o.boss_name}</td>
-                        <td>${modeLabel}</td>
-                        <td>${formatMinutes(o.run_minutes)} / ${o.run_rounds || 0}战损</td>
-                        <td>${o.status === 'completed' ? `${formatMinutes(o.actual_minutes)} / ${Math.max(0, Math.min(o.run_rounds || 0, (o.round_count || 0) - Math.max(0, (o.max_rounds || 0) - (o.run_rounds || 0))))}战损` : '--'}</td>
-                        <td>${o.status === 'completed' ? `${formatMinutes(o.refund_minutes)} / ${o.refund_rounds || 0}战损` : '--'}</td>
+                        <td>${escHtml(o.id)}</td>
+                        <td>${escHtml(o.device_name || '--')}</td>
+                        <td>${escHtml(o.boss_name || '')}</td>
+                        <td>${escHtml(modeLabel)}</td>
+                        <td>${escHtml(formatMinutes(o.run_minutes))} / ${escHtml(o.run_rounds || 0)}战损</td>
+                        <td>${o.status === 'completed' ? `${escHtml(formatMinutes(o.actual_minutes))} / ${escHtml(Math.max(0, Math.min(o.run_rounds || 0, (o.round_count || 0) - Math.max(0, (o.max_rounds || 0) - (o.run_rounds || 0)))))}战损` : '--'}</td>
+                        <td>${o.status === 'completed' ? `${escHtml(formatMinutes(o.refund_minutes))} / ${escHtml(o.refund_rounds || 0)}战损` : '--'}</td>
                         <td>${statusHtml}</td>
-                        <td>${formatDateTime(o.created_at)}</td>
+                        <td>${escHtml(formatDateTime(o.created_at))}</td>
                         <td class="order-action-cell">${actionHtml}</td>
                     </tr>`;
 
@@ -2867,23 +2881,29 @@
                         </tr>`;
                     }
 
-                    if (o.status === 'running' && (o.enhanced_radar_url || o.native_radar_url)) {
+                    const enhancedUrl = safeHttpUrl(o.enhanced_radar_url);
+                    const nativeUrl = safeHttpUrl(o.native_radar_url);
+                    if (o.status === 'running' && (enhancedUrl || nativeUrl)) {
                         html += `<tr>
                             <td colspan="10" style="background:#eff6ff;padding:8px 14px;border-bottom:1px solid #dbeafe;">`;
 
-                        if (o.enhanced_radar_url) {
-                            html += `<div style="margin-bottom:${o.native_radar_url ? '6px' : '0'};">
+                        if (enhancedUrl) {
+                            const enhancedText = escHtml(enhancedUrl);
+                            const enhancedEncoded = encodeURIComponent(enhancedUrl);
+                            html += `<div style="margin-bottom:${nativeUrl ? '6px' : '0'};">
                                 <span style="font-size:12px;color:#1d4ed8;">增强版备注网址：</span>
-                                <a href="${o.enhanced_radar_url}" target="_blank" style="font-size:12px;color:#3b82f6;word-break:break-all;">${o.enhanced_radar_url}</a>
-                                <button class="btn-sm btn-primary" style="margin-left:8px;padding:2px 10px;font-size:11px;" onclick="copyRadarUrl('${o.enhanced_radar_url}')">复制</button>
+                                <a href="${enhancedText}" target="_blank" rel="noopener noreferrer" style="font-size:12px;color:#3b82f6;word-break:break-all;">${enhancedText}</a>
+                                <button class="btn-sm btn-primary" style="margin-left:8px;padding:2px 10px;font-size:11px;" onclick="copyRadarUrl(decodeURIComponent('${enhancedEncoded}'))">复制</button>
                             </div>`;
                         }
 
-                        if (o.native_radar_url) {
+                        if (nativeUrl) {
+                            const nativeText = escHtml(nativeUrl);
+                            const nativeEncoded = encodeURIComponent(nativeUrl);
                             html += `<div>
                                 <span style="font-size:12px;color:#1d4ed8;">原生备注网址：</span>
-                                <a href="${o.native_radar_url}" target="_blank" style="font-size:12px;color:#3b82f6;word-break:break-all;">${o.native_radar_url}</a>
-                                <button class="btn-sm btn-primary" style="margin-left:8px;padding:2px 10px;font-size:11px;" onclick="copyRadarUrl('${o.native_radar_url}')">复制</button>
+                                <a href="${nativeText}" target="_blank" rel="noopener noreferrer" style="font-size:12px;color:#3b82f6;word-break:break-all;">${nativeText}</a>
+                                <button class="btn-sm btn-primary" style="margin-left:8px;padding:2px 10px;font-size:11px;" onclick="copyRadarUrl(decodeURIComponent('${nativeEncoded}'))">复制</button>
                             </div>`;
                         }
 
@@ -3034,7 +3054,7 @@
                     sel.innerHTML = '<option value="">暂无空闲设备</option>';
                 } else {
                     sel.innerHTML = idle.map(d =>
-                        `<option value="${d.id}">${d.name}（${d.mode_label}）</option>`
+                        `<option value="${escHtml(d.id)}">${escHtml(d.name)}（${escHtml(d.mode_label)}）</option>`
                     ).join('');
                 }
             } catch (e) {
