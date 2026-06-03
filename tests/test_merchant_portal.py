@@ -974,6 +974,10 @@ def test_legacy_customer_login_portal_and_api_compatibility(app_and_bridge):
     assert "账号登录" in login_html
     assert "包夜卡登录" in login_html
     assert "/api/night-login" in login_html
+    assert "quickLogin" not in login_html
+    assert "AdminQuickLogin" not in login_html
+    assert "ENCRYPT_KEY" not in login_html
+    assert "是否保存登录信息" not in login_html
 
     register_html = client.get("/register").text
     assert "验证码" in register_html
@@ -1016,6 +1020,56 @@ def test_legacy_customer_login_portal_and_api_compatibility(app_and_bridge):
     assert devices["capacity"]["capacity_label"] == "many"
     assert devices["capacity"]["capacity_text"] == "空闲较多"
     assert len(devices["capacity"]["idle_device_ids"]) == 3
+
+    bridge.devices[1].update(
+        {
+            "control_state": "busy",
+            "agent_state": "running",
+            "running_order_id": 991,
+            "running_user_id": 9991,
+            "running_user": "other_customer",
+            "running_boss_name": "OTHER123",
+            "boss_id": "OTHER123",
+            "boss_id_debug": "debug-secret",
+            "radar_url": "https://radar.internal/hidden",
+            "last_heartbeat_at": iso(),
+            "runtime": {
+                "sub_state": "internal",
+                "current_map": "classified-map",
+                "prison_stage": "stage1",
+                "prison_stage_label": "stage label",
+            },
+        }
+    )
+    bridge.idle = [did for did in bridge.idle if did != 1]
+    sanitized_devices = client.get("/api/devices/status").json()["devices"]
+    customer_device_keys = set(sanitized_devices[0].keys())
+    assert not {
+        "device_key",
+        "machine_id",
+        "boss_id",
+        "boss_id_debug",
+        "running_user",
+        "running_boss_name",
+        "radar_url",
+        "accept_orders",
+        "last_heartbeat_at",
+        "heartbeat_age_seconds",
+        "state",
+        "sub_state",
+        "work_status_detail",
+        "current_map",
+        "prison_stage",
+        "prison_stage_label",
+        "prison_point",
+        "prison_action",
+        "prison_score",
+        "prison_match",
+        "prison_region",
+    } & customer_device_keys
+    other_running = next(d for d in sanitized_devices if d["id"] == 1)
+    assert other_running["running_user_id"] == 9991
+    assert other_running["spectate_boss"] == ""
 
     order = client.post("/api/order", json={"boss_name": "ABC1234", "mode": "machine"})
     assert order.status_code == 200, order.text

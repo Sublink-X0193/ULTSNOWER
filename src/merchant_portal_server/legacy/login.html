@@ -333,7 +333,6 @@
                     <input type="password" id="password" placeholder="请输入密码" autocomplete="current-password" required />
                 </div>
                 <button type="submit" class="login-btn" id="loginBtn">登 录</button>
-                <button type="button" class="login-btn" id="quickLoginBtn" style="display:none;background:#10b981;margin-top:10px;" onclick="quickLogin()">快速登录</button>
             </form>
             <div class="footer-link">
                 没有账号？<a href="#" onclick="goToRegister(); return false;">立即注册</a>
@@ -359,40 +358,7 @@
     <script>
         const tenantId = 5782;
 
-        // 固定加密密钥
-        const ENCRYPT_KEY = 'AdminQuickLogin2026Secret';
-
-        // 简单加密函数
-        function encrypt(text) {
-            let result = '';
-            for (let i = 0; i < text.length; i++) {
-                result += String.fromCharCode(text.charCodeAt(i) ^ ENCRYPT_KEY.charCodeAt(i % ENCRYPT_KEY.length));
-            }
-            // 使用 encodeURIComponent 处理中文字符
-            return btoa(encodeURIComponent(result));
-        }
-
-        // 简单解密函数
-        function decrypt(encoded) {
-            try {
-                const text = decodeURIComponent(atob(encoded));
-                let result = '';
-                for (let i = 0; i < text.length; i++) {
-                    result += String.fromCharCode(text.charCodeAt(i) ^ ENCRYPT_KEY.charCodeAt(i % ENCRYPT_KEY.length));
-                }
-                return result;
-            } catch (e) {
-                return null;
-            }
-        }
-
-        // 页面加载时检查localStorage是否有保存的管理员配置
-        (function checkAdminConfig() {
-            const config = localStorage.getItem('adminQuickLogin');
-            if (config) {
-                document.getElementById('quickLoginBtn').style.display = 'block';
-            }
-        })();
+        try { localStorage.removeItem('adminQuickLogin'); } catch (e) {}
 
         // 加载包夜卡时间窗口配置并更新提示
         (async function loadNightConfig() {
@@ -448,19 +414,6 @@
                 const data = await res.json();
 
                 if (data.ok) {
-                    // 管理员登录成功后询问是否保存
-                    if (data.role === 'admin') {
-                        try {
-                            const saved = localStorage.getItem('adminQuickLogin');
-                            const message = saved ? '是否更新保存的快速登录配置？' : '是否保存登录信息以便下次快速登录？';
-                            if (confirm(message)) {
-                                const config = encrypt(JSON.stringify({ username, password }));
-                                localStorage.setItem('adminQuickLogin', config);
-                            }
-                        } catch (e) {
-                            console.error('保存配置失败:', e);
-                        }
-                    }
                     msg.className = 'msg success';
                     msg.textContent = '登录成功，正在跳转...';
                     document.getElementById('pageTransition').classList.add('active');
@@ -476,62 +429,6 @@
                 msg.textContent = '网络错误，请重试';
                 btn.disabled = false;
                 btn.textContent = '登 录';
-            }
-        }
-
-        // 快速登录
-        async function quickLogin() {
-            const btn = document.getElementById('quickLoginBtn');
-            const msg = document.getElementById('msg');
-
-            btn.disabled = true;
-            btn.textContent = '登录中...';
-            msg.textContent = '';
-
-            try {
-                const configStr = localStorage.getItem('adminQuickLogin');
-                if (!configStr) {
-                    msg.className = 'msg error';
-                    msg.textContent = '未找到保存的配置';
-                    btn.disabled = false;
-                    btn.textContent = '快速登录';
-                    return;
-                }
-
-                const decrypted = decrypt(configStr);
-                if (!decrypted) {
-                    msg.className = 'msg error';
-                    msg.textContent = '配置解密失败';
-                    btn.disabled = false;
-                    btn.textContent = '快速登录';
-                    return;
-                }
-
-                const config = JSON.parse(decrypted);
-
-                const res = await fetch('/api/login', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username: config.username, password: config.password, tenant_id: tenantId })
-                });
-                const data = await res.json();
-
-                if (data.ok) {
-                    msg.className = 'msg success';
-                    msg.textContent = '登录成功，正在跳转...';
-                    document.getElementById('pageTransition').classList.add('active');
-                    setTimeout(() => { window.location.href = data.redirect; }, 800);
-                } else {
-                    msg.className = 'msg error';
-                    msg.textContent = data.msg || '登录失败';
-                    btn.disabled = false;
-                    btn.textContent = '快速登录';
-                }
-            } catch (err) {
-                msg.className = 'msg error';
-                msg.textContent = '网络错误，请重试';
-                btn.disabled = false;
-                btn.textContent = '快速登录';
             }
         }
 

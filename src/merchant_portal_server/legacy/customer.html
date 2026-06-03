@@ -2761,7 +2761,6 @@
                     appAlert(data.msg || '下单失败');
                 }
             } catch (e) {
-                console.error('下单错误:', e);
                 appAlert('网络错误: ' + e.message);
             } finally {
                 btn.disabled = false;

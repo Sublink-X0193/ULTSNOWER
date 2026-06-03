@@ -1476,6 +1476,35 @@ def _capacity_from_legacy_devices(devices: list[dict[str, Any]]) -> dict[str, An
     }
 
 
+def _customer_device_view(device: dict[str, Any], customer: dict[str, Any]) -> dict[str, Any]:
+    """Return only the fields the customer UI needs for a device card."""
+
+    running_user_id = _to_int(device.get("running_user_id"), 0) or None
+    is_mine = bool(running_user_id and running_user_id == _to_int(customer.get("id"), 0))
+    view = {
+        "id": _to_int(device.get("id") or device.get("device_id"), 0),
+        "name": device.get("name") or device.get("device_name") or "",
+        "device_name": device.get("device_name") or device.get("name") or "",
+        "mode": device.get("mode") or "machine",
+        "mode_label": device.get("mode_label") or _legacy_mode_label(str(device.get("mode") or "machine")),
+        "work_status": device.get("work_status") or "未知",
+        "running_order_id": device.get("running_order_id"),
+        "running_user_id": running_user_id,
+        "remaining_minutes": _to_int(device.get("remaining_minutes"), 0),
+        "remaining_seconds": _to_int(device.get("remaining_seconds"), 0),
+        "end_time": _to_int(device.get("end_time"), 0),
+        "end_time_ms": _to_int(device.get("end_time_ms"), 0),
+        "cooldown_until_ms": _to_int(device.get("cooldown_until_ms"), 0),
+        "harvard": device.get("harvard") or "",
+        "hfb_value": _to_int(device.get("hfb_value"), 0),
+        "spectate_boss": (device.get("spectate_boss") or "") if is_mine else "",
+        "round_count": _to_int(device.get("round_count"), 0),
+        "run_rounds": _to_int(device.get("run_rounds"), 0),
+        "max_rounds": _to_int(device.get("max_rounds"), 0),
+    }
+    return view
+
+
 def _legacy_devices_status(service: Any, customer: dict[str, Any]) -> dict[str, Any]:
     settings = service.get_settings()
     devices: list[dict[str, Any]] = []
@@ -1546,7 +1575,7 @@ def _legacy_devices_status(service: Any, customer: dict[str, Any]) -> dict[str, 
         devices.sort(key=lambda d: (0 if d.get("running_user_id") == customer.get("id") else 1, 0 if d.get("work_status") == "空闲" else 1, int(d.get("id") or 0)))
         capacity = _capacity_from_legacy_devices(devices)
         return {
-            "devices": devices,
+            "devices": [_customer_device_view(d, customer) for d in devices],
             "capacity": capacity,
             "privacy_mode": bool(settings.get("privacy_mode_enabled")),
             "privacy_skip_balance": max(0, int(settings.get("privacy_skip_balance") or 0)),
@@ -1651,7 +1680,7 @@ def _legacy_devices_status(service: Any, customer: dict[str, Any]) -> dict[str, 
     devices.sort(key=lambda d: (0 if d.get("running_user_id") == customer.get("id") else 1, 0 if d.get("work_status") == "空闲" else 1, int(d.get("id") or 0)))
     capacity = _capacity_from_legacy_devices(devices)
     return {
-        "devices": devices,
+        "devices": [_customer_device_view(d, customer) for d in devices],
         "capacity": capacity,
         "privacy_mode": bool(settings.get("privacy_mode_enabled")),
         "privacy_skip_balance": max(0, int(settings.get("privacy_skip_balance") or 0)),
