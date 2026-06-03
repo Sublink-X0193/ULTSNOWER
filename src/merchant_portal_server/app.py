@@ -86,6 +86,9 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     app.state.service = service
     app.state.worker_task = None
     rate_buckets: dict[str, list[float]] = {}
+    security_failures: dict[str, dict[str, Any]] = {}
+    security_bans: dict[str, float] = {}
+    app.state.security_bans = security_bans
 
     def setup_exempt_path(path: str) -> bool:
         return path in {"/setup", "/api/setup/status", "/api/setup/bridge", "/health", "/favicon.ico"} or path.startswith("/static/")
@@ -102,6 +105,75 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         rows.append(now)
         rate_buckets[key] = rows
         return False
+
+    def effective_client_ip(request: Request) -> str:
+        host = request.client.host if request.client else "unknown"
+        trust_forwarded = host in {"testclient", "testserver", "localhost"}
+        if not trust_forwarded:
+            try:
+                trust_forwarded = ipaddress.ip_address(host).is_loopback
+            except ValueError:
+                trust_forwarded = False
+        if trust_forwarded:
+            real_ip = (request.headers.get("x-real-ip") or "").strip()
+            forwarded_chain = [x.strip() for x in (request.headers.get("x-forwarded-for") or "").split(",") if x.strip()]
+            candidate = real_ip or (forwarded_chain[-1] if forwarded_chain else "")
+            if candidate:
+                return candidate[:64]
+        return str(host or "unknown")[:64]
+
+    def sensitive_auth_path(path: str) -> bool:
+        return path in {"/api/login", "/api/night-login", "/api/admin/login", "/login", "/merchant-admin/login", "/api/setup/bridge"}
+
+    def security_ban_settings() -> tuple[bool, int, int, int]:
+        st = service.get_settings()
+        enabled = truthy(st.get("security_auto_ban_enabled", True))
+        limit = max(1, int(st.get("security_auto_ban_fail_limit") or 10))
+        ban_seconds = max(60, int(st.get("security_auto_ban_minutes") or 15) * 60)
+        window_seconds = max(60, int(st.get("security_auto_ban_window_minutes") or 10) * 60)
+        return enabled, limit, ban_seconds, window_seconds
+
+    def ip_ban_remaining_seconds(ip: str) -> int:
+        now = time_mod.monotonic()
+        until = float(security_bans.get(ip) or 0)
+        if until <= now:
+            security_bans.pop(ip, None)
+            return 0
+        return max(1, int(until - now))
+
+    def clear_security_failures(ip: str) -> None:
+        security_failures.pop(ip, None)
+
+    def record_security_failure(ip: str, *, path: str, status_code: int, limit: int, ban_seconds: int, window_seconds: int) -> None:
+        now = time_mod.monotonic()
+        row = security_failures.get(ip) or {"count": 0, "first_at": now}
+        if now - float(row.get("first_at") or now) > window_seconds:
+            row = {"count": 0, "first_at": now}
+        row["count"] = int(row.get("count") or 0) + 1
+        row["last_path"] = path
+        row["last_status_code"] = int(status_code)
+        security_failures[ip] = row
+        if int(row["count"]) >= limit:
+            security_bans[ip] = now + ban_seconds
+            security_failures.pop(ip, None)
+            try:
+                service.log_audit_event(
+                    "system",
+                    None,
+                    "security",
+                    "security_ip_auto_ban",
+                    "ip",
+                    ip,
+                    {
+                        "path": path,
+                        "status_code": int(status_code),
+                        "fail_count": int(row["count"]),
+                        "limit": int(limit),
+                        "ban_minutes": max(1, int(ban_seconds // 60)),
+                    },
+                )
+            except Exception:
+                pass
 
     def same_origin_request(request: Request) -> bool:
         origin = request.headers.get("origin") or request.headers.get("referer") or ""
@@ -131,6 +203,14 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     @app.middleware("http")
     async def hardening_middleware(request: Request, call_next):
         path = request.url.path
+        client_ip = effective_client_ip(request)
+        is_sensitive_auth = request.method.upper() == "POST" and sensitive_auth_path(path)
+        security_enabled, security_limit, security_ban_seconds, security_window_seconds = security_ban_settings() if is_sensitive_auth else (False, 10, 900, 600)
+        if is_sensitive_auth and security_enabled:
+            remaining = ip_ban_remaining_seconds(client_ip)
+            if remaining > 0:
+                minutes = max(1, (remaining + 59) // 60)
+                return json_fail("ip_auto_banned", f"该 IP 因连续敏感操作失败已临时封禁，请约 {minutes} 分钟后再试", 429)
         if setup_required_effective() and not setup_exempt_path(path):
             if path.startswith("/api/") or request.method.upper() != "GET":
                 return json_fail("setup_required", "请先完成服务接入首次配置", 428)
@@ -141,10 +221,21 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
             if not same_origin_request(request):
                 return json_fail("bad_origin", "请求来源不可信", 403)
         if request.method.upper() == "POST" and path in {"/api/login", "/api/night-login", "/api/register", "/api/admin/login", "/login", "/merchant-admin/login", "/api/setup/bridge"}:
-            host = request.client.host if request.client else "unknown"
-            if too_many_attempts(f"{host}:{path}", limit=60 if path == "/api/register" else 40, window_seconds=300):
+            if too_many_attempts(f"{client_ip}:{path}", limit=60 if path == "/api/register" else 40, window_seconds=300):
                 return json_fail("rate_limited", "请求过于频繁，请稍后再试", 429)
         response = await call_next(request)
+        if is_sensitive_auth and security_enabled:
+            if response.status_code in {400, 401, 403}:
+                record_security_failure(
+                    client_ip,
+                    path=path,
+                    status_code=int(response.status_code),
+                    limit=security_limit,
+                    ban_seconds=security_ban_seconds,
+                    window_seconds=security_window_seconds,
+                )
+            elif 200 <= response.status_code < 400:
+                clear_security_failures(client_ip)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("Referrer-Policy", "same-origin")
@@ -249,7 +340,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
             payload["privacy_mode_enabled"] = truthy(payload.get("privacy_mode"))
         if "maintenance_mode" in payload and "maintenance_mode_enabled" not in payload:
             payload["maintenance_mode_enabled"] = truthy(payload.get("maintenance_mode"))
-        for key in ("night_time_check", "ace_enabled", "allow_custom_loadout", "announcement_enabled"):
+        for key in ("night_time_check", "ace_enabled", "allow_custom_loadout", "announcement_enabled", "security_auto_ban_enabled"):
             if key in payload:
                 payload[key] = truthy(payload.get(key))
         return payload
@@ -1241,6 +1332,9 @@ def _setup_html(cfg: dict[str, Any], *, require_admin_password: bool = True) -> 
           <div><label>包夜结束时间<input id="settingNightEndTime" type="time" value="{_escape(st.get("night_end_time") or "06:10")}"></label></div>
           <div><label>隐私模式跳过余额阈值<input id="settingPrivacySkipBalance" type="number" min="0" value="{_escape(st.get("privacy_skip_balance") or 0)}"></label></div>
           <div><label>绝密最大配装价值 W<input id="settingMaxLoadoutCost" type="number" min="0" value="{_escape(st.get("max_loadout_cost") or 65)}"></label></div>
+          <div><label>自动封禁失败次数<input id="settingSecurityFailLimit" type="number" min="1" value="{_escape(st.get("security_auto_ban_fail_limit") or 10)}"></label></div>
+          <div><label>自动封禁时长（分钟）<input id="settingSecurityBanMinutes" type="number" min="1" value="{_escape(st.get("security_auto_ban_minutes") or 15)}"></label></div>
+          <div><label>失败统计窗口（分钟）<input id="settingSecurityWindowMinutes" type="number" min="1" value="{_escape(st.get("security_auto_ban_window_minutes") or 10)}"></label></div>
           <div class="full"><label>全局雷达/备注地址<input id="settingGlobalRadarUrl" value="{_escape(st.get("global_radar_url") or "")}" placeholder="可留空"></label></div>
           <div class="full"><label>维护文案<textarea id="settingMaintenanceMessage" placeholder="维护时展示给客户">{_escape(st.get("maintenance_message") or "")}</textarea></label></div>
           <div class="full"><label>公告内容<textarea id="settingAnnouncementText" placeholder="前台公告">{_escape(st.get("announcement_text") or "")}</textarea></label></div>
@@ -1248,6 +1342,8 @@ def _setup_html(cfg: dict[str, Any], *, require_admin_password: bool = True) -> 
         <label class="switch"><input id="settingNightTimeCheck" type="checkbox" {checked("night_time_check")}> 启用包夜卡登录时间限制</label>
         <label class="switch"><input id="settingPrivacyMode" type="checkbox" {checked("privacy_mode_enabled")}> 启用隐私模式</label>
         <label class="switch"><input id="settingAceEnabled" type="checkbox" {checked("ace_enabled")}> 启用异常结单检测</label>
+        <label class="switch"><input id="settingSecurityAutoBanEnabled" type="checkbox" {checked("security_auto_ban_enabled")}> 启用敏感操作自动封禁</label>
+        <div class="hint">默认连续 10 次登录/后台登录/首启验证失败后，临时封禁该 IP 15 分钟。</div>
         <label class="switch"><input id="settingAllowCustomLoadout" type="checkbox" {checked("allow_custom_loadout")}> 开放自定义配装</label>
         <div class="hint">不建议开启，BUG 非常多，等待维修中；默认关闭。</div>
         <label class="switch"><input id="settingMaintenanceMode" type="checkbox" {checked("maintenance_mode_enabled")}> 平台维护模式</label>
@@ -1275,6 +1371,10 @@ def _setup_html(cfg: dict[str, Any], *, require_admin_password: bool = True) -> 
           privacy_mode_enabled: $('settingPrivacyMode').checked,
           privacy_skip_balance: Number($('settingPrivacySkipBalance').value || 0),
           ace_enabled: $('settingAceEnabled').checked,
+          security_auto_ban_enabled: $('settingSecurityAutoBanEnabled').checked,
+          security_auto_ban_fail_limit: Number($('settingSecurityFailLimit').value || 10),
+          security_auto_ban_minutes: Number($('settingSecurityBanMinutes').value || 15),
+          security_auto_ban_window_minutes: Number($('settingSecurityWindowMinutes').value || 10),
           maintenance_mode_enabled: $('settingMaintenanceMode').checked,
           maintenance_message: $('settingMaintenanceMessage').value,
           announcement_enabled: $('settingAnnouncementEnabled').checked,
@@ -2261,6 +2361,31 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
             订单异常结单检测
           </label>
           <div class="hint">开启后，若客户在机器"已准备待进图"状态下主动结单，系统将开启2分钟检测窗口：机器下一状态若为"空闲"则订单正常；若进入"选择干员中"则判定异常结单，自动冻结该客户账号</div>
+        </div>
+
+        <div class="field" style="border:1px solid #bfdbfe;background:#eff6ff;padding:10px 12px;border-radius:8px;">
+          <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-weight:600;color:#1d4ed8;">
+            <input type="checkbox" id="settingSecurityAutoBanEnabled" style="width:auto;" />
+            敏感操作自动封禁
+          </label>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px;">
+            <label style="display:inline-flex;align-items:center;gap:6px;">
+              <span style="color:#6b7280;">连续失败</span>
+              <input type="number" id="settingSecurityFailLimit" min="1" step="1" value="10" style="width:90px;" />
+              <span style="color:#6b7280;">次</span>
+            </label>
+            <label style="display:inline-flex;align-items:center;gap:6px;">
+              <span style="color:#6b7280;">封禁</span>
+              <input type="number" id="settingSecurityBanMinutes" min="1" step="1" value="15" style="width:90px;" />
+              <span style="color:#6b7280;">分钟</span>
+            </label>
+            <label style="display:inline-flex;align-items:center;gap:6px;">
+              <span style="color:#6b7280;">统计窗口</span>
+              <input type="number" id="settingSecurityWindowMinutes" min="1" step="1" value="10" style="width:90px;" />
+              <span style="color:#6b7280;">分钟</span>
+            </label>
+          </div>
+          <div class="hint">用于登录、后台登录、包夜登录、首启配置验证等敏感入口；失败达到阈值后临时封禁该 IP，并写入审计日志。</div>
         </div>
 
         <div class="field" style="border:1px solid #fde68a;background:#fffbeb;padding:10px 12px;border-radius:8px;">
@@ -3804,6 +3929,14 @@ async function loadSettings() {
     document.getElementById('settingPrivacyMode').checked = s.privacy_mode === '1' || s.privacy_mode_enabled === true;
     document.getElementById('settingPrivacySkipBalance').value = parseInt(s.privacy_skip_balance || '0') || 0;
     document.getElementById('settingAceEnabled').checked = s.ace_enabled === '1' || s.ace_enabled === true;
+    const securityAutoBan = document.getElementById('settingSecurityAutoBanEnabled');
+    if (securityAutoBan) securityAutoBan.checked = s.security_auto_ban_enabled !== '0' && s.security_auto_ban_enabled !== false;
+    const securityFailLimit = document.getElementById('settingSecurityFailLimit');
+    if (securityFailLimit) securityFailLimit.value = parseInt(s.security_auto_ban_fail_limit || '10') || 10;
+    const securityBanMinutes = document.getElementById('settingSecurityBanMinutes');
+    if (securityBanMinutes) securityBanMinutes.value = parseInt(s.security_auto_ban_minutes || '15') || 15;
+    const securityWindowMinutes = document.getElementById('settingSecurityWindowMinutes');
+    if (securityWindowMinutes) securityWindowMinutes.value = parseInt(s.security_auto_ban_window_minutes || '10') || 10;
     const maintCheckbox = document.getElementById('settingMaintenanceMode');
     if (maintCheckbox) maintCheckbox.checked = s.maintenance_mode === '1' || s.maintenance_mode_enabled === true;
     const maintMsgInput = document.getElementById('settingMaintenanceMessage');
@@ -3845,6 +3978,13 @@ async function saveSettings() {
   let privacySkipBalance = parseInt(document.getElementById('settingPrivacySkipBalance').value);
   if (isNaN(privacySkipBalance) || privacySkipBalance < 0) privacySkipBalance = 0;
   const aceEnabled = document.getElementById('settingAceEnabled').checked ? '1' : '0';
+  const securityAutoBan = document.getElementById('settingSecurityAutoBanEnabled')?.checked ? '1' : '0';
+  let securityFailLimit = parseInt(document.getElementById('settingSecurityFailLimit')?.value || '10');
+  if (isNaN(securityFailLimit) || securityFailLimit < 1) securityFailLimit = 10;
+  let securityBanMinutes = parseInt(document.getElementById('settingSecurityBanMinutes')?.value || '15');
+  if (isNaN(securityBanMinutes) || securityBanMinutes < 1) securityBanMinutes = 15;
+  let securityWindowMinutes = parseInt(document.getElementById('settingSecurityWindowMinutes')?.value || '10');
+  if (isNaN(securityWindowMinutes) || securityWindowMinutes < 1) securityWindowMinutes = 10;
   const systemName = (document.getElementById('settingSystemName').value || '').trim();
   const maintCheckbox = document.getElementById('settingMaintenanceMode');
   const maintMsgInput = document.getElementById('settingMaintenanceMessage');
@@ -3860,6 +4000,10 @@ async function saveSettings() {
       privacy_mode: privacyMode,
       privacy_skip_balance: String(privacySkipBalance),
       ace_enabled: aceEnabled,
+      security_auto_ban_enabled: securityAutoBan,
+      security_auto_ban_fail_limit: String(securityFailLimit),
+      security_auto_ban_minutes: String(securityBanMinutes),
+      security_auto_ban_window_minutes: String(securityWindowMinutes),
       system_name: systemName,
       maintenance_mode: maintenanceMode,
       maintenance_message: maintenanceMessage,

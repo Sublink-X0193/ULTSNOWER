@@ -47,6 +47,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "max_loadout_cost": 65,
     "allow_custom_loadout": False,
     "equipment_config": [],
+    "security_auto_ban_enabled": True,
+    "security_auto_ban_fail_limit": 10,
+    "security_auto_ban_minutes": 15,
+    "security_auto_ban_window_minutes": 10,
 }
 
 V9_LOADOUT_CATALOG: dict[str, tuple[str, ...]] = {
@@ -2126,13 +2130,24 @@ class MerchantService:
         return self._normalize_settings(out)
 
     def _normalize_settings(self, out: dict[str, Any]) -> dict[str, Any]:
-        for key in ("privacy_mode_enabled", "maintenance_mode_enabled", "announcement_enabled", "night_time_check", "ace_enabled", "allow_custom_loadout"):
+        for key in ("privacy_mode_enabled", "maintenance_mode_enabled", "announcement_enabled", "night_time_check", "ace_enabled", "allow_custom_loadout", "security_auto_ban_enabled"):
             out[key] = self._bool_value(out.get(key))
-        for key, default in (("default_limit_rounds", 4), ("absolute_rounds_per_hour", 3), ("privacy_skip_balance", 0), ("max_loadout_cost", 65)):
+        for key, default in (
+            ("default_limit_rounds", 4),
+            ("absolute_rounds_per_hour", 3),
+            ("privacy_skip_balance", 0),
+            ("max_loadout_cost", 65),
+            ("security_auto_ban_fail_limit", 10),
+            ("security_auto_ban_minutes", 15),
+            ("security_auto_ban_window_minutes", 10),
+        ):
             try:
                 out[key] = max(0, int(out.get(key, default)))
             except Exception:
                 out[key] = default
+        out["security_auto_ban_fail_limit"] = max(1, int(out.get("security_auto_ban_fail_limit") or 10))
+        out["security_auto_ban_minutes"] = max(1, int(out.get("security_auto_ban_minutes") or 15))
+        out["security_auto_ban_window_minutes"] = max(1, int(out.get("security_auto_ban_window_minutes") or 10))
         for key in ("maintenance_message", "announcement_text", "system_name", "night_start_time", "night_end_time", "global_radar_url"):
             out[key] = str(out.get(key) or DEFAULT_SETTINGS.get(key) or "")
         out["announcement_text"] = sanitize_notice_html(out.get("announcement_text"))
@@ -2153,11 +2168,21 @@ class MerchantService:
                 continue
             if key.endswith("_enabled") or key in {"night_time_check", "ace_enabled", "allow_custom_loadout"}:
                 sanitized[key] = self._bool_value(values.get(key))
-            elif key in {"default_limit_rounds", "absolute_rounds_per_hour", "privacy_skip_balance", "max_loadout_cost"}:
+            elif key in {
+                "default_limit_rounds",
+                "absolute_rounds_per_hour",
+                "privacy_skip_balance",
+                "max_loadout_cost",
+                "security_auto_ban_fail_limit",
+                "security_auto_ban_minutes",
+                "security_auto_ban_window_minutes",
+            }:
                 try:
                     sanitized[key] = max(0, int(values.get(key) or 0))
                 except Exception:
                     raise MerchantError("bad_setting", f"{key} 必须是数字")
+                if key.startswith("security_auto_ban_"):
+                    sanitized[key] = max(1, sanitized[key])
             elif key == "announcement_text":
                 text = str(values.get(key) or "").strip()
                 if len(text) > 4000:

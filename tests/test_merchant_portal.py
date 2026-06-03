@@ -1583,6 +1583,34 @@ def test_admin_origin_check_and_backup_roundtrip(app_and_bridge):
     assert any(l["action"] == "backup_restore" for l in logs)
 
 
+def test_sensitive_auth_failures_auto_ban_ip(app_and_bridge):
+    app, _bridge = app_and_bridge
+    app.state.service.update_settings(
+        1,
+        {
+            "security_auto_ban_enabled": True,
+            "security_auto_ban_fail_limit": 3,
+            "security_auto_ban_minutes": 1,
+            "security_auto_ban_window_minutes": 5,
+        },
+    )
+    client = TestClient(app)
+    headers = {"X-Forwarded-For": "203.0.113.44"}
+    for _ in range(3):
+        r = client.post("/api/admin/login", json={"username": "admin", "password": "bad-password"}, headers=headers)
+        assert r.status_code == 401, r.text
+
+    banned = client.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}, headers=headers)
+    assert banned.status_code == 429
+    assert banned.json()["error"] == "ip_auto_banned"
+
+    other_ip = client.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}, headers={"X-Forwarded-For": "203.0.113.45"})
+    assert other_ip.status_code == 200, other_ip.text
+
+    logs = app.state.service.admin_audit_logs(limit=20)
+    assert any(x["action"] == "security_ip_auto_ban" and x["resource_id"] == "203.0.113.44" for x in logs)
+
+
 def test_admin_role_management_and_owner_only_mutations(app_and_bridge):
     app, _bridge = app_and_bridge
     owner = TestClient(app)
