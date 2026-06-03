@@ -1235,7 +1235,7 @@ class MerchantService:
         runtime = self._runtime_from_device(d)
         did = int(d.get("id") or d.get("device_id") or 0)
         online = bool(d.get("online", True))
-        mode = d.get("mode") or d.get("device_mode") or "machine"
+        mode = self._normalize_device_mode(d.get("mode") or d.get("device_mode") or "machine")
         active_view = self._admin_order_view(active) if active else None
         raw_status = runtime.get("work_status") or runtime.get("state") or runtime.get("agent_state") or d.get("control_state") or "idle"
         work_status = self._frontend_work_status(raw_status)
@@ -1276,7 +1276,7 @@ class MerchantService:
             "running_boss_name": running_boss or "",
             "team_code": runtime.get("team_code") or running_boss or "",
             "boss_name": runtime.get("boss_name") or running_boss or "",
-            "running_mode": runtime.get("running_mode") or (active.get("quality") if active else "") or "",
+            "running_mode": self._normalize_device_mode(runtime.get("running_mode") or (active.get("quality") if active else "") or ""),
             "work_status": work_status,
             "work_status_detail": runtime.get("work_status_detail") or runtime.get("sub_state") or "",
             "sub_state": runtime.get("sub_state") or "",
@@ -1369,6 +1369,8 @@ class MerchantService:
     @staticmethod
     def _normalize_device_mode(mode: Any) -> str:
         mode_s = str(mode or "machine").strip().lower()
+        if mode_s in {"secret", "standard"}:
+            return "absolute" if mode_s == "secret" else "machine"
         return mode_s if mode_s in {"machine", "hybrid", "absolute"} else "machine"
 
     @staticmethod

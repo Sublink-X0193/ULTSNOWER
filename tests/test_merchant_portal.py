@@ -901,6 +901,44 @@ def test_html_pages_escape_user_controlled_values(app_and_bridge):
     assert "<TAG>" not in history
 
 
+def test_notice_html_sanitizer_blocks_xss_vectors(app_and_bridge):
+    app, _bridge = app_and_bridge
+    admin = TestClient(app)
+    assert admin.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+    payload = """
+      <b>保留加粗</b>
+      <img src=x onerror=alert(1)>
+      <svg onload=alert(2)><circle></circle></svg>
+      <a href="javascript:alert(3)" onclick="alert(4)">链接</a>
+      <div style="background:url(javascript:alert(5))">文本</div>
+      <script>alert(6)</script>
+    """
+    saved = admin.post("/api/admin/notice", json={"content": payload})
+    assert saved.status_code == 200, saved.text
+    notice = admin.get("/api/notice").json()["content"].lower()
+    for bad in ["<img", "<svg", "<script", "onerror", "onload", "onclick", "javascript:", "style="]:
+        assert bad not in notice
+    assert "<b>保留加粗</b>" in notice
+    assert "<a>链接</a>" in notice
+    assert "<div>文本</div>" in notice
+
+
+def test_bridge_device_mode_is_normalized_before_admin_frontend(app_and_bridge):
+    app, bridge = app_and_bridge
+    bridge.devices[1]["mode"] = "machine');window.__xss=1;//"
+    bridge.devices[1]["display_name"] = "设备<script>alert(1)</script>"
+    admin = TestClient(app)
+    assert admin.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+
+    devices = admin.get("/api/admin/devices").json()["devices"]
+    row = next(d for d in devices if d["id"] == 1)
+    assert row["mode"] == "machine"
+    assert "window.__xss" not in str(row)
+
+    html = admin.get("/merchant-admin").text
+    assert "window.__xss" not in html
+
+
 def test_admin_customer_and_order_management_surfaces(app_and_bridge):
     app, bridge = app_and_bridge
     admin_client = TestClient(app)

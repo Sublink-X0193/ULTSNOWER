@@ -1595,12 +1595,17 @@ def _customer_device_view(device: dict[str, Any], customer: dict[str, Any]) -> d
 
     running_user_id = _to_int(device.get("running_user_id"), 0) or None
     is_mine = bool(running_user_id and running_user_id == _to_int(customer.get("id"), 0))
+    mode = str(device.get("mode") or "machine").strip().lower()
+    if mode == "secret":
+        mode = "absolute"
+    if mode not in {"machine", "hybrid", "absolute"}:
+        mode = "machine"
     view = {
         "id": _to_int(device.get("id") or device.get("device_id"), 0),
         "name": device.get("name") or device.get("device_name") or "",
         "device_name": device.get("device_name") or device.get("name") or "",
-        "mode": device.get("mode") or "machine",
-        "mode_label": device.get("mode_label") or _legacy_mode_label(str(device.get("mode") or "machine")),
+        "mode": mode,
+        "mode_label": device.get("mode_label") or _legacy_mode_label(mode),
         "work_status": device.get("work_status") or "未知",
         "running_order_id": device.get("running_order_id"),
         "running_user_id": running_user_id,
@@ -3102,6 +3107,8 @@ function renderDevicesAdmin(rows) {
     const encWatchdog = encodeURIComponent(d.watchdog_card || '');
     const mode = d.mode || d.device_mode || 'machine';
     const nextMode = mode === 'machine' ? 'hybrid' : (mode === 'hybrid' ? 'absolute' : 'machine');
+    const encMode = encodeURIComponent(mode);
+    const encNextMode = encodeURIComponent(nextMode);
     const shortKey = devKey ? (devKey.length > 16 ? devKey.slice(0, 12) + '...' : devKey) : '未绑定机器ID';
     const status = d.work_status || (d.online ? ((o || d.running_order_id) ? '执行中' : '空闲') : '离线');
     const runUser = d.running_user || d.active_customer || (o ? (o.customer_username || o.customer_id) : '');
@@ -3136,7 +3143,7 @@ function renderDevicesAdmin(rows) {
     // 其余维护动作统一收进“更多 ▴”下拉菜单。
     let actionBtns = '';
     if (status === '空闲' && !d.running_order_id) {
-      actionBtns += `<button class="btn-sm btn-green" onclick="openManualOrderModal(${d.id}, decodeURIComponent('${encName}'), '${esc(mode)}')">手动下单</button>`;
+      actionBtns += `<button class="btn-sm btn-green" onclick="openManualOrderModal(${d.id}, decodeURIComponent('${encName}'), decodeURIComponent('${encMode}'))">手动下单</button>`;
     }
     if (d.running_order_id) {
       actionBtns += `<button class="btn-sm btn-purple" onclick="adminRejoin(${d.running_order_id})">换队</button>`;
@@ -3170,10 +3177,10 @@ function renderDevicesAdmin(rows) {
             <button class="dropdown-item" onclick="restartBackupPC(${d.id}, decodeURIComponent('${encName}'))" ${wdBtnAttr} title="${esc(wdBtnTitle)}">重启备用电脑</button>
             <button class="dropdown-item" onclick="updateDevice(decodeURIComponent('${encKey}'), decodeURIComponent('${encName}'))">远程更新</button>
             <button class="dropdown-item" onclick="collectLog(decodeURIComponent('${encKey}'), decodeURIComponent('${encName}'))">回收日志</button>
-            <button class="dropdown-item" onclick="switchMode(${d.id}, '${esc(nextMode)}')">${newModeLabel}</button>
+            <button class="dropdown-item" onclick="switchMode(${d.id}, decodeURIComponent('${encNextMode}'))">${newModeLabel}</button>
             <button class="dropdown-item" onclick="toggleAcceptOrders(${d.id}, ${d.accept_orders === false ? 1 : 0})">${d.accept_orders === false ? '恢复接单' : '停止接单'}</button>
             <button class="dropdown-item" onclick="toggleDevice(${d.id}, ${d.enabled ? 0 : 1})">${d.enabled ? '禁用设备' : '启用设备'}</button>
-            <button class="dropdown-item" onclick="editDevice(${d.id}, decodeURIComponent('${encName}'), decodeURIComponent('${encKey}'), '${esc(mode)}', decodeURIComponent('${encRadar}'), decodeURIComponent('${encWatchdog}'))">编辑设备</button>
+            <button class="dropdown-item" onclick="editDevice(${d.id}, decodeURIComponent('${encName}'), decodeURIComponent('${encKey}'), decodeURIComponent('${encMode}'), decodeURIComponent('${encRadar}'), decodeURIComponent('${encWatchdog}'))">编辑设备</button>
             <button class="dropdown-item text-danger" onclick="deleteDevice(${d.id})">删除设备</button>
         </div>
     </div>`;
