@@ -1067,6 +1067,13 @@ class MerchantService:
                 active = self._active_order_row(con, customer_id)
                 if active:
                     raise MerchantError("customer_has_active_order", "客户有进行中订单，不能删除", 409)
+                order_count = int(con.execute("SELECT COUNT(*) AS n FROM local_orders WHERE customer_id=?", (customer_id,)).fetchone()["n"])
+                if order_count:
+                    raise MerchantError("customer_has_orders", "客户已有订单记录，不能直接删除；可冻结账号保留账务记录", 409)
+                con.execute("DELETE FROM sessions WHERE customer_id=?", (customer_id,))
+                con.execute("DELETE FROM customer_activity_events WHERE customer_id=?", (customer_id,))
+                con.execute("DELETE FROM recharge_records WHERE customer_id=?", (customer_id,))
+                con.execute("UPDATE recharge_cards SET used_by_customer_id=NULL WHERE used_by_customer_id=?", (customer_id,))
                 cur = con.execute("DELETE FROM customers WHERE id=?", (customer_id,))
                 if cur.rowcount == 0:
                     raise MerchantError("not_found", "客户不存在", 404)

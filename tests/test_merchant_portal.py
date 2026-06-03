@@ -966,6 +966,20 @@ def test_admin_customer_and_order_management_surfaces(app_and_bridge):
     assert "暂无在线客户" in html
 
 
+def test_admin_can_delete_logged_in_customer_without_history(app_and_bridge):
+    app, _bridge = app_and_bridge
+    admin = TestClient(app)
+    assert admin.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+    created = admin.post("/api/admin/customers", json={"username": "delete_me", "password": "123456", "balance_minutes": 0})
+    customer = created.json()["customer"]
+
+    user = TestClient(app)
+    assert user.post("/api/login", json={"username": "delete_me", "password": "123456"}).status_code == 200
+    assert admin.delete(f"/api/admin/customers/{customer['id']}").status_code == 200
+    listed = admin.get("/api/admin/customers").json()["customers"]
+    assert all(c["id"] != customer["id"] for c in listed)
+
+
 def test_legacy_customer_login_portal_and_api_compatibility(app_and_bridge):
     app, bridge = app_and_bridge
     client = TestClient(app)
