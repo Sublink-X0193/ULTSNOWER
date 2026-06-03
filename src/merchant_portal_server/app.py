@@ -618,7 +618,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         return json_ok(
             equipment=public_equipment,
             max_loadout_cost=cfg.get("max_loadout_cost", 65),
-            allow_custom_loadout=cfg.get("allow_custom_loadout", True),
+            allow_custom_loadout=cfg.get("allow_custom_loadout", False),
         )
 
     def legacy_place_order(request: Request, body: dict[str, Any], customer: dict[str, Any], *, auto: bool = False) -> dict[str, Any]:
@@ -1248,7 +1248,8 @@ def _setup_html(cfg: dict[str, Any], *, require_admin_password: bool = True) -> 
         <label class="switch"><input id="settingNightTimeCheck" type="checkbox" {checked("night_time_check")}> 启用包夜卡登录时间限制</label>
         <label class="switch"><input id="settingPrivacyMode" type="checkbox" {checked("privacy_mode_enabled")}> 启用隐私模式</label>
         <label class="switch"><input id="settingAceEnabled" type="checkbox" {checked("ace_enabled")}> 启用异常结单检测</label>
-        <label class="switch"><input id="settingAllowCustomLoadout" type="checkbox" {checked("allow_custom_loadout")}> 允许客户自定义绝密配装</label>
+        <label class="switch"><input id="settingAllowCustomLoadout" type="checkbox" {checked("allow_custom_loadout")}> 开放自定义配装</label>
+        <div class="hint">不建议开启，BUG 非常多，等待维修中；默认关闭。</div>
         <label class="switch"><input id="settingMaintenanceMode" type="checkbox" {checked("maintenance_mode_enabled")}> 平台维护模式</label>
         <label class="switch"><input id="settingAnnouncementEnabled" type="checkbox" {checked("announcement_enabled")}> 启用公告栏</label>
       </div>
@@ -2101,10 +2102,10 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
       </div>
       <div class="panel" style="margin-bottom:14px">
         <div class="mini-grid">
-          <label class="switch-line"><input type="checkbox" id="allowCustomLoadout"> 允许客户自定义配装</label>
+          <label class="switch-line"><input type="checkbox" id="allowCustomLoadout"> 开放自定义配装</label>
           <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;">最大配装价值 <input type="number" id="maxLoadoutCost" min="0" class="config-input" value="65"> W</label>
         </div>
-        <div class="hint" style="margin-top:8px">这些装备参数会随订单下发到设备端；商户后台负责保存配置，不直接运行设备脚本。</div>
+        <div class="hint" style="margin-top:8px">不建议开启，BUG 非常多，等待维修中；默认关闭。</div>
       </div>
       <div id="equipmentConfigTable"></div>
     </div>

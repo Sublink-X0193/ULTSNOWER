@@ -45,7 +45,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "announcement_enabled": False,
     "announcement_text": "",
     "max_loadout_cost": 65,
-    "allow_custom_loadout": True,
+    "allow_custom_loadout": False,
     "equipment_config": [],
 }
 
@@ -2319,7 +2319,7 @@ class MerchantService:
         return self.update_settings(admin_id, {
             "equipment_config": payload.get("equipment") or [],
             "max_loadout_cost": payload.get("max_loadout_cost", 65),
-            "allow_custom_loadout": bool(payload.get("allow_custom_loadout", True)),
+            "allow_custom_loadout": bool(payload.get("allow_custom_loadout", False)),
         })
 
     # ---------- recharge ----------
