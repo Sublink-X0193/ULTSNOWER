@@ -280,6 +280,34 @@ def test_register_login_recharge(app_and_bridge):
     assert client.get("/api/me").json()["customer"]["username"] == customer["username"]
 
 
+def test_shared_login_allows_admin_and_blocks_customer_admin_name(app_and_bridge):
+    app, _bridge = app_and_bridge
+    client = TestClient(app)
+
+    old_admin_login = client.get("/merchant-admin/login", follow_redirects=False)
+    assert old_admin_login.status_code == 303
+    assert old_admin_login.headers["location"] == "/login"
+
+    api_admin = client.post("/api/login", json={"username": "admin", "password": "admin123456"})
+    assert api_admin.status_code == 200, api_admin.text
+    assert api_admin.json()["role"] == "admin"
+    assert api_admin.json()["redirect"] == "/merchant-admin"
+    assert client.get("/merchant-admin").status_code == 200
+
+    form_admin = TestClient(app)
+    posted = form_admin.post("/login", data={"username": "admin", "password": "admin123456"}, follow_redirects=False)
+    assert posted.status_code == 303
+    assert posted.headers["location"] == "/merchant-admin"
+
+    anon = TestClient(app)
+    anon.get("/api/captcha")
+    captcha = (anon.cookies.get("merchant_register_captcha") or "").split(":", 1)[0]
+    rejected = anon.post("/api/register", json={"username": "admin", "password": "123456", "captcha": captcha})
+    assert rejected.status_code == 400
+    assert rejected.json()["error"] == "bad_username"
+    assert rejected.json()["message"] == "此账户名不合法"
+
+
 def test_order_waits_for_ready_timer_before_running(app_and_bridge):
     app, bridge = app_and_bridge
     client = TestClient(app)
@@ -1144,8 +1172,8 @@ def test_setup_wizard_bridge_config_requires_admin_password_when_enforced(tmp_pa
     ok = client.post(
         "/api/setup/bridge",
         json={
-            "admin_username": "owner",
-            "admin_password": "owner123456",
+            "admin_username": "Admin",
+            "admin_password": "Admin",
             "bridge_base_url": "https://bridge.example.com",
             "bridge_merchant_key": "mk_live",
             "bridge_merchant_secret": "secret-live",
@@ -1158,7 +1186,9 @@ def test_setup_wizard_bridge_config_requires_admin_password_when_enforced(tmp_pa
     assert status["setup_required"] is False
     assert status["bridge_base_url"] == "https://bridge.example.com"
     assert status["bridge_merchant_secret_set"] is True
-    assert client.post("/api/admin/login", json={"username": "owner", "password": "owner123456"}).status_code == 200
+    shared_login = client.post("/api/login", json={"username": "Admin", "password": "Admin"})
+    assert shared_login.status_code == 200
+    assert shared_login.json()["role"] == "admin"
     public_settings = client.get("/api/public/settings").json()["settings"]
     assert public_settings["system_name"] == "七元电竞"
     assert public_settings["maintenance_mode_enabled"] is True

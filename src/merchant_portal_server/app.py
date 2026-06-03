@@ -326,10 +326,18 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
 
     @app.post("/login")
     def login_form(username: str = Form(...), password: str = Form(...)) -> RedirectResponse:
+        admin = service.authenticate_admin_optional(username, password)
+        if admin:
+            sid = service.create_admin_session(admin["id"])
+            resp = RedirectResponse("/merchant-admin", status_code=303)
+            clear_session_cookie(resp)
+            set_admin_cookie(resp, sid)
+            return resp
         customer = service.authenticate(username, password)
         sid = service.create_session(customer["id"])
         service.record_customer_login(customer["id"], source="form_login")
         resp = RedirectResponse("/customer", status_code=303)
+        clear_admin_cookie(resp)
         set_session_cookie(resp, sid)
         return resp
 
@@ -373,7 +381,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     def admin_login_page() -> HTMLResponse:
         if setup_required_effective():
             return RedirectResponse("/setup", status_code=303)  # type: ignore[return-value]
-        return HTMLResponse(_layout("管理后台登录", _form("/merchant-admin/login", [("username", "管理员"), ("password", "密码", "password")], "登录")))
+        return RedirectResponse("/login", status_code=303)  # type: ignore[return-value]
 
     @app.post("/merchant-admin/login")
     def admin_login_form(username: str = Form(...), password: str = Form(...)) -> RedirectResponse:
@@ -386,7 +394,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     @app.post("/merchant-admin/logout")
     def admin_logout(request: Request) -> RedirectResponse:
         service.delete_admin_session(request.cookies.get("merchant_admin_session") or "")
-        resp = RedirectResponse("/merchant-admin/login", status_code=303)
+        resp = RedirectResponse("/login", status_code=303)
         clear_admin_cookie(resp)
         return resp
 
@@ -473,7 +481,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
                 service.bridge = new_bridge
                 app.state.bridge = new_bridge
         msg = "首次配置已保存" if not has_bridge_credentials else "全局设置与 Bridge API Key 已保存"
-        return json_ok(msg=msg, bridge=setup_config_view(), settings=admin_settings_view(service.get_settings()), redirect="/merchant-admin/login")
+        return json_ok(msg=msg, bridge=setup_config_view(), settings=admin_settings_view(service.get_settings()), redirect="/login")
 
     # JSON API
     @app.post("/api/register")
@@ -488,9 +496,16 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
 
     @app.post("/api/login")
     def api_login(response: Response, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        admin = service.authenticate_admin_optional(body.get("username") or "", body.get("password") or "")
+        if admin:
+            sid = service.create_admin_session(admin["id"])
+            clear_session_cookie(response)
+            set_admin_cookie(response, sid)
+            return json_ok(msg="登录成功", redirect="/merchant-admin", role="admin", admin=admin)
         customer = service.authenticate(body.get("username") or "", body.get("password") or "")
         sid = service.create_session(customer["id"])
         service.record_customer_login(customer["id"], source="api_login")
+        clear_admin_cookie(response)
         set_session_cookie(response, sid)
         return json_ok(msg="登录成功", redirect="/customer", role="customer", customer=customer)
 
@@ -1171,7 +1186,7 @@ def _setup_html(cfg: dict[str, Any], *, require_admin_password: bool = True) -> 
     else:
         admin_title = "本地管理员账户"
         admin_fields = "<div class='hint'>已登录管理员，会直接保存到本地配置。</div>"
-    skip_button = "" if cfg.get("setup_enforced") else """<button class="btn-secondary" onclick="location.href='/merchant-admin/login'">测试期跳过 API Key，进入后台登录</button>"""
+    skip_button = "" if cfg.get("setup_enforced") else """<button class="btn-secondary" onclick="location.href='/login'">测试期跳过 API Key，进入登录页</button>"""
     setup_note = "正式模式：必须填入 Bridge API Key 后才能进入业务页面。" if cfg.get("setup_enforced") else "测试期间：当前不强制填写 API Key；可先保存全局设置，Bridge Key/Secret 留空。"
     return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
     <title>首次配置 Bridge API Key / 全局设置</title>
@@ -1259,7 +1274,7 @@ def _setup_html(cfg: dict[str, Any], *, require_admin_password: bool = True) -> 
       const data=await res.json().catch(()=>({{ok:false,message:'响应解析失败'}}));
       if(!res.ok||data.ok===false){{msg.className='err'; msg.textContent=data.message||data.error||'保存失败'; return;}}
       msg.className='ok'; msg.textContent=data.msg || '保存成功，正在跳转后台登录...';
-      setTimeout(()=>location.href=data.redirect||'/merchant-admin/login',700);
+      setTimeout(()=>location.href=data.redirect||'/login',700);
     }}
     </script></body></html>"""
 

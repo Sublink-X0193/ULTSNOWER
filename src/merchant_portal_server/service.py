@@ -459,6 +459,8 @@ class MerchantService:
         with self.db.connect() as con:
             try:
                 con.execute("BEGIN IMMEDIATE")
+                if con.execute("SELECT 1 FROM merchant_admins WHERE lower(username)=lower(?)", (username,)).fetchone():
+                    raise MerchantError("bad_username", "此账户名不合法", 400)
                 cur = con.execute(
                     """INSERT INTO customers(
                          username,password_hash,
@@ -1837,8 +1839,8 @@ class MerchantService:
         username = str(username or "").strip()
         if not username or len(username) > 64:
             raise MerchantError("bad_username", "管理员用户名不合法")
-        if len(str(password or "")) < 6:
-            raise MerchantError("bad_password", "管理员密码至少 6 位")
+        if len(str(password or "")) < 4:
+            raise MerchantError("bad_password", "管理员密码至少 4 位")
         now_s = iso()
         with self.db.connect() as con:
             con.execute("BEGIN IMMEDIATE")
@@ -1871,6 +1873,22 @@ class MerchantService:
             except Exception:
                 con.rollback()
                 raise
+
+    def authenticate_admin_optional(self, username: str, password: str) -> dict[str, Any] | None:
+        """Authenticate an admin without recording a failed admin audit entry.
+
+        Used by the shared /login customer/admin entry. A normal customer login
+        attempt should not generate an admin-login-failed audit row simply
+        because the username is not an admin username.
+        """
+        username = str(username or "").strip()
+        with self.db.connect() as con:
+            row = con.execute("SELECT * FROM merchant_admins WHERE username=? AND status='active'", (username,)).fetchone()
+            if not row or not verify_password(str(password or ""), row["password_hash"]):
+                return None
+            con.execute("UPDATE merchant_admins SET last_login_at=?,updated_at=? WHERE id=?", (iso(), iso(), int(row["id"])))
+            self._log_admin_action_locked(con, dict(row), "admin_login", "auth", int(row["id"]), {"source": "shared_login"})
+            return self.public_admin(dict(row))
 
     def authenticate_admin(self, username: str, password: str) -> dict[str, Any]:
         username = str(username or "").strip()
