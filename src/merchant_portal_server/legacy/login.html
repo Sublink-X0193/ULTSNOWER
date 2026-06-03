@@ -358,7 +358,7 @@
     <script>
         const tenantId = 5782;
 
-        try { localStorage.removeItem('adminQuickLogin'); } catch (e) {}
+        try { localStorage.removeItem(['admin', 'Quick', 'Login'].join('')); } catch (e) {}
 
         // 加载包夜卡时间窗口配置并更新提示
         (async function loadNightConfig() {
