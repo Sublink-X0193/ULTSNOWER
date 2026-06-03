@@ -19,7 +19,7 @@
         /* 左侧品牌区 */
         .brand-section {
             flex: 1;
-            background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             display: flex;
             flex-direction: column;
             justify-content: center;
@@ -28,27 +28,18 @@
             position: relative;
             overflow: hidden;
         }
-        .brand-section::before {
-            content: '';
+        #particleCanvas {
             position: absolute;
-            width: 500px;
-            height: 500px;
-            background: radial-gradient(circle, rgba(59,130,246,0.1) 0%, transparent 70%);
-            border-radius: 50%;
-            top: -200px;
-            left: -200px;
-            animation: float 6s ease-in-out infinite;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        .brand-section::before {
+            display: none;
         }
         .brand-section::after {
-            content: '';
-            position: absolute;
-            width: 400px;
-            height: 400px;
-            background: radial-gradient(circle, rgba(139,92,246,0.08) 0%, transparent 70%);
-            border-radius: 50%;
-            bottom: -150px;
-            right: -150px;
-            animation: float 8s ease-in-out infinite reverse;
+            display: none;
         }
         @keyframes float {
             0%, 100% { transform: translate(0, 0); }
@@ -62,13 +53,13 @@
         .brand-title {
             font-size: 48px;
             font-weight: 700;
-            color: #1f2937;
+            color: #ffffff;
             margin-bottom: 16px;
             letter-spacing: -1px;
         }
         .brand-subtitle {
             font-size: 18px;
-            color: #6b7280;
+            color: #ffffff;
             line-height: 1.6;
         }
 
@@ -235,9 +226,10 @@
 <body>
     <!-- 左侧品牌区 -->
     <div class="brand-section">
+        <canvas id="particleCanvas"></canvas>
         <div class="brand-content">
             <h1 class="brand-title">__SYSTEM_NAME__</h1>
-            <p class="brand-subtitle">高效便捷的自助服务平台<br>随时随地轻松下单</p>
+            <p class="brand-subtitle" id="currentTime"></p>
         </div>
     </div>
 
@@ -347,6 +339,49 @@
                 window.location.href = '/login';
             }
         }
+
+        // 粒子动画，与登录页保持一致
+        const canvas = document.getElementById('particleCanvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = canvas.offsetWidth;
+        canvas.height = canvas.offsetHeight;
+
+        const particles = [];
+        for (let i = 0; i < 50; i++) {
+            particles.push({
+                x: Math.random() * canvas.width,
+                y: Math.random() * canvas.height,
+                vx: (Math.random() - 0.5) * 0.5,
+                vy: (Math.random() - 0.5) * 0.5,
+                r: Math.random() * 2 + 1
+            });
+        }
+
+        function animate() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = 'rgba(255,255,255,0.5)';
+            particles.forEach(p => {
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+                ctx.fill();
+                p.x += p.vx;
+                p.y += p.vy;
+                if (p.x < 0 || p.x > canvas.width) p.vx *= -1;
+                if (p.y < 0 || p.y > canvas.height) p.vy *= -1;
+            });
+            requestAnimationFrame(animate);
+        }
+        animate();
+
+        // 更新时间，与登录页保持一致
+        function updateTime() {
+            const now = new Date();
+            const time = now.toLocaleTimeString('zh-CN', { hour12: false });
+            const date = now.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
+            document.getElementById('currentTime').textContent = `${date} ${time}`;
+        }
+        updateTime();
+        setInterval(updateTime, 1000);
     </script>
 </body>
 </html>
