@@ -29,6 +29,7 @@ ACTIVE_ORDER_STATUSES = {
 }
 RENEWABLE_STATUSES = {"claiming_device", "device_claimed", "commanding", "waiting_ready_timer", "running"}
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
+MAX_PASSWORD_LENGTH = 128
 DEFAULT_SETTINGS: dict[str, Any] = {
     "system_name": "SNOW 自助下单",
     "default_limit_rounds": 4,
@@ -137,6 +138,18 @@ def sanitize_notice_html(value: Any) -> str:
         return "".join(parser.out)
     except Exception:
         return html_escape(raw, quote=False)
+
+
+def _password_len(value: Any) -> int:
+    return len(str(value or ""))
+
+
+def _check_password_length(value: Any, *, min_len: int, label: str = "密码") -> None:
+    n = _password_len(value)
+    if n < min_len:
+        raise MerchantError("bad_password", f"{label}至少 {min_len} 位")
+    if n > MAX_PASSWORD_LENGTH:
+        raise MerchantError("bad_password", f"{label}最多 {MAX_PASSWORD_LENGTH} 位")
 
 
 class MerchantError(RuntimeError):
@@ -457,8 +470,7 @@ class MerchantService:
         username = str(username or "").strip()
         if not (3 <= len(username) <= 64):
             raise MerchantError("bad_username", "用户名长度必须为 3-64")
-        if len(str(password or "")) < 4:
-            raise MerchantError("bad_password", "密码至少 4 位")
+        _check_password_length(password, min_len=4)
         now_s = iso()
         with self.db.connect() as con:
             try:
@@ -491,7 +503,7 @@ class MerchantService:
         username = str(username or "").strip()
         with self.db.connect() as con:
             row = con.execute("SELECT * FROM customers WHERE username=? AND status='active'", (username,)).fetchone()
-            if not row or not verify_password(str(password or ""), row["password_hash"]):
+            if not row or _password_len(password) > MAX_PASSWORD_LENGTH or not verify_password(str(password or ""), row["password_hash"]):
                 self._log_audit_locked(
                     con,
                     actor_type="customer",
@@ -1056,8 +1068,7 @@ class MerchantService:
         return self.get_customer(customer_id)
 
     def admin_reset_customer_password(self, customer_id: int, password: str) -> dict[str, Any]:
-        if len(str(password or "")) < 4:
-            raise MerchantError("bad_password", "密码至少 4 位")
+        _check_password_length(password, min_len=4)
         with self.db.connect() as con:
             cur = con.execute("UPDATE customers SET password_hash=?,updated_at=? WHERE id=?", (hash_password(password), iso(), customer_id))
             if cur.rowcount == 0:
@@ -1852,8 +1863,7 @@ class MerchantService:
         username = str(username or "").strip()
         if not username or len(username) > 64:
             raise MerchantError("bad_username", "管理员用户名不合法")
-        if len(str(password or "")) < 4:
-            raise MerchantError("bad_password", "管理员密码至少 4 位")
+        _check_password_length(password, min_len=4, label="管理员密码")
         now_s = iso()
         with self.db.connect() as con:
             con.execute("BEGIN IMMEDIATE")
@@ -1895,6 +1905,8 @@ class MerchantService:
         because the username is not an admin username.
         """
         username = str(username or "").strip()
+        if _password_len(password) > MAX_PASSWORD_LENGTH:
+            return None
         with self.db.connect() as con:
             row = con.execute("SELECT * FROM merchant_admins WHERE username=? AND status='active'", (username,)).fetchone()
             if not row or not verify_password(str(password or ""), row["password_hash"]):
@@ -1907,7 +1919,7 @@ class MerchantService:
         username = str(username or "").strip()
         with self.db.connect() as con:
             row = con.execute("SELECT * FROM merchant_admins WHERE username=? AND status='active'", (username,)).fetchone()
-            if not row or not verify_password(str(password or ""), row["password_hash"]):
+            if not row or _password_len(password) > MAX_PASSWORD_LENGTH or not verify_password(str(password or ""), row["password_hash"]):
                 self._log_audit_locked(
                     con,
                     actor_type="admin",
@@ -1995,8 +2007,7 @@ class MerchantService:
         status = str(status or "active").strip().lower()
         if not username or len(username) > 64:
             raise MerchantError("bad_username", "管理员用户名不合法")
-        if len(str(password or "")) < 6:
-            raise MerchantError("bad_password", "管理员密码至少 6 位")
+        _check_password_length(password, min_len=6, label="管理员密码")
         if status not in {"active", "disabled"}:
             raise MerchantError("bad_status", "管理员状态必须是 active 或 disabled")
         now_s = iso()
@@ -2059,8 +2070,7 @@ class MerchantService:
         return self.admin_get_admin(admin_id)
 
     def admin_reset_admin_password(self, actor: dict[str, Any] | None, admin_id: int, password: str) -> dict[str, Any]:
-        if len(str(password or "")) < 6:
-            raise MerchantError("bad_password", "管理员密码至少 6 位")
+        _check_password_length(password, min_len=6, label="管理员密码")
         with self.db.connect() as con:
             con.execute("BEGIN IMMEDIATE")
             try:

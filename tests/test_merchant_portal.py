@@ -1295,11 +1295,18 @@ def test_setup_wizard_bridge_config_requires_admin_password_when_enforced(tmp_pa
     status = client.get("/api/setup/status").json()
     assert status["configured"] is True
     assert status["setup_required"] is False
-    assert status["bridge_base_url"] == "https://bridge.example.com"
+    assert status["bridge_base_url"] == ""
+    assert status["bridge_merchant_key"] == ""
     assert status["bridge_merchant_secret_set"] is True
+    setup_after_config = client.get("/setup", follow_redirects=False)
+    assert setup_after_config.status_code == 303
+    assert setup_after_config.headers["location"] == "/login"
     shared_login = client.post("/api/login", json={"username": "Admin", "password": "Admin"})
     assert shared_login.status_code == 200
     assert shared_login.json()["role"] == "admin"
+    admin_status = client.get("/api/setup/status").json()
+    assert admin_status["bridge_base_url"] == "https://bridge.example.com"
+    assert admin_status["bridge_merchant_key"] == "mk_live"
     public_settings = client.get("/api/public/settings").json()["settings"]
     assert public_settings["system_name"] == "七元电竞"
     assert public_settings["maintenance_mode_enabled"] is True
@@ -1619,6 +1626,56 @@ def test_admin_origin_check_and_backup_roundtrip(app_and_bridge):
     logs = admin.get("/api/admin/audit-logs").json()["logs"]
     assert any(l["action"] == "backup_create" for l in logs)
     assert any(l["action"] == "backup_restore" for l in logs)
+
+
+def test_customer_unsafe_posts_reject_cross_origin(app_and_bridge):
+    app, _bridge = app_and_bridge
+    client = TestClient(app)
+    register_and_login(client, "origin_user")
+    app.state.service.add_recharge_card("ORIGIN-CARD", minutes=20)
+    assert client.post("/api/recharge/redeem", json={"code": "ORIGIN-CARD"}).status_code == 200
+
+    rejected = client.post(
+        "/api/orders",
+        headers={"Origin": "http://evil.example"},
+        json={"requested_minutes": 5, "team_code": "ORIGIN"},
+    )
+    assert rejected.status_code == 403
+    assert rejected.json()["error"] == "bad_origin"
+
+    login_rejected = TestClient(app).post(
+        "/api/login",
+        headers={"Origin": "http://evil.example"},
+        json={"username": "origin_user", "password": "123456"},
+    )
+    assert login_rejected.status_code == 403
+    assert login_rejected.json()["error"] == "bad_origin"
+
+    allowed = client.post(
+        "/api/orders",
+        headers={"Origin": "http://testserver"},
+        json={"requested_minutes": 5, "team_code": "SAFEORG"},
+    )
+    assert allowed.status_code == 200, allowed.text
+
+
+def test_public_auth_password_length_is_capped(app_and_bridge):
+    app, _bridge = app_and_bridge
+    client = TestClient(app)
+    huge = "x" * 129
+    client.get("/api/captcha")
+    captcha = (client.cookies.get("merchant_register_captcha") or "").split(":", 1)[0]
+    rejected_register = client.post("/api/register", json={"username": "huge_pw", "password": huge, "captcha": captcha})
+    assert rejected_register.status_code == 400
+    assert rejected_register.json()["error"] == "bad_password"
+
+    rejected_customer_login = client.post("/api/login", json={"username": "admin", "password": huge})
+    assert rejected_customer_login.status_code == 401
+    assert rejected_customer_login.json()["error"] == "bad_credentials"
+
+    rejected_admin_login = client.post("/api/admin/login", json={"username": "admin", "password": huge})
+    assert rejected_admin_login.status_code == 401
+    assert rejected_admin_login.json()["error"] == "bad_credentials"
 
 
 def test_sensitive_auth_failures_auto_ban_ip(app_and_bridge):

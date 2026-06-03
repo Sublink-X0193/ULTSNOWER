@@ -203,8 +203,17 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     @app.middleware("http")
     async def hardening_middleware(request: Request, call_next):
         path = request.url.path
+        method = request.method.upper()
         client_ip = effective_client_ip(request)
-        is_sensitive_auth = request.method.upper() == "POST" and sensitive_auth_path(path)
+        unsafe_method = method in {"POST", "PUT", "PATCH", "DELETE"}
+        if unsafe_method:
+            raw_content_length = request.headers.get("content-length") or ""
+            try:
+                if raw_content_length and int(raw_content_length) > 1024 * 1024:
+                    return json_fail("payload_too_large", "请求体过大", 413)
+            except ValueError:
+                return json_fail("bad_content_length", "请求长度不合法", 400)
+        is_sensitive_auth = method == "POST" and sensitive_auth_path(path)
         security_enabled, security_limit, security_ban_seconds, security_window_seconds = security_ban_settings() if is_sensitive_auth else (False, 10, 900, 600)
         if is_sensitive_auth and security_enabled:
             remaining = ip_ban_remaining_seconds(client_ip)
@@ -212,15 +221,15 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
                 minutes = max(1, (remaining + 59) // 60)
                 return json_fail("ip_auto_banned", f"该 IP 因连续敏感操作失败已临时封禁，请约 {minutes} 分钟后再试", 429)
         if setup_required_effective() and not setup_exempt_path(path):
-            if path.startswith("/api/") or request.method.upper() != "GET":
+            if path.startswith("/api/") or method != "GET":
                 return json_fail("setup_required", "请先完成服务接入首次配置", 428)
             return RedirectResponse("/setup", status_code=303)
         if path.startswith("/internal/") and not internal_worker_request_allowed(request):
             return json_fail("forbidden_internal_endpoint", "内部任务接口只允许本机或携带内部令牌访问", 403)
-        if request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"} and (path.startswith("/api/admin/") or path.startswith("/merchant-admin") or path == "/api/setup/bridge"):
+        if unsafe_method and not path.startswith("/internal/"):
             if not same_origin_request(request):
                 return json_fail("bad_origin", "请求来源不可信", 403)
-        if request.method.upper() == "POST" and path in {"/api/login", "/api/night-login", "/api/register", "/api/admin/login", "/login", "/merchant-admin/login", "/api/setup/bridge"}:
+        if method == "POST" and path in {"/api/login", "/api/night-login", "/api/register", "/api/admin/login", "/login", "/merchant-admin/login", "/api/setup/bridge"}:
             if too_many_attempts(f"{client_ip}:{path}", limit=60 if path == "/api/register" else 40, window_seconds=300):
                 return json_fail("rate_limited", "请求过于频繁，请稍后再试", 429)
         response = await call_next(request)
@@ -368,13 +377,21 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         out["system_name_placeholder"] = st.get("system_name") or "SNOW 自助下单"
         return out
 
-    def setup_config_view() -> dict[str, Any]:
+    def setup_config_view(*, redact_sensitive: bool = False) -> dict[str, Any]:
         cfg = service.bridge_config_view()
         raw_required = bool(cfg.get("setup_required"))
         cfg["setup_required_raw"] = raw_required
         cfg["setup_enforced"] = bool(settings.require_bridge_setup)
         cfg["setup_required"] = bool(settings.require_bridge_setup and raw_required)
-        cfg["settings"] = admin_settings_view(service.get_settings())
+        full_settings = admin_settings_view(service.get_settings())
+        if redact_sensitive:
+            for key in ("bridge_base_url", "bridge_merchant_key", "bridge_api_prefix", "bridge_auth_header_prefix"):
+                cfg[key] = ""
+            # Do not expose admin-editable setup/security defaults to visitors;
+            # public-facing values remain available through /api/public/settings.
+            cfg["settings"] = {"system_name": full_settings.get("system_name") or ""}
+        else:
+            cfg["settings"] = full_settings
         return cfg
 
     @app.get("/health")
@@ -520,12 +537,14 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     @app.get("/setup", response_class=HTMLResponse)
     def setup_page(request: Request) -> HTMLResponse:
         admin = maybe_admin(request)
-        cfg = setup_config_view()
+        if not admin and not service.bridge_setup_required():
+            return RedirectResponse("/login", status_code=303)  # type: ignore[return-value]
+        cfg = setup_config_view(redact_sensitive=not bool(admin))
         return HTMLResponse(_setup_html(cfg, require_admin_password=not bool(admin)))
 
     @app.get("/api/setup/status")
-    def api_setup_status() -> dict[str, Any]:
-        return json_ok(**setup_config_view())
+    def api_setup_status(request: Request) -> dict[str, Any]:
+        return json_ok(**setup_config_view(redact_sensitive=not bool(maybe_admin(request))))
 
     @app.post("/api/setup/bridge")
     def api_setup_bridge(request: Request, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
