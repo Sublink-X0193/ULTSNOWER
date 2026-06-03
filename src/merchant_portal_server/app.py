@@ -470,7 +470,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         merchant_settings = service.get_settings()
         if merchant_settings.get("maintenance_mode_enabled"):
             return HTMLResponse(_layout("下单", "<p>维护模式已开启，暂时不能新下单。</p><p><a href='/'>返回</a></p>"))
-        return HTMLResponse(_layout("下单", _form("/orders", [("requested_minutes", "分钟"), ("team_code", "队伍码"), ("quality", "配置/品质")], "下单")))
+        return HTMLResponse(_layout("下单", _form("/orders", [("requested_minutes", "分钟"), ("team_code", "队伍码（ABC1234）"), ("quality", "配置/品质")], "下单")))
 
     @app.post("/orders")
     def order_form(request: Request, requested_minutes: int = Form(...), team_code: str = Form(...), quality: str = Form("standard"), customer: dict[str, Any] = Depends(current_customer)) -> RedirectResponse:
@@ -798,9 +798,8 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
 
     @app.post("/api/order/{order_id}/switch_spectate")
     def api_legacy_switch_spectate(order_id: int, customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
-        service.assert_customer_order(order_id, customer["id"])
-        service.log_customer_action(customer["id"], customer.get("username"), "customer_switch_spectate_request", "order", order_id, {})
-        return json_ok(msg="已切换观战")
+        result = service.customer_switch_spectate_order(order_id, customer["id"])
+        return json_ok(msg="已下发切换视角指令", order=_legacy_order_view(result.get("order"), service.get_settings()), command=result.get("command"))
 
     @app.post("/api/order/{order_id}/switch-device")
     def api_legacy_switch_device(order_id: int, body: dict[str, Any] = Body(default_factory=dict), customer: dict[str, Any] = Depends(current_customer)) -> dict[str, Any]:
@@ -2065,6 +2064,10 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
     .badge-machine { background:#dbeafe; color:#1d4ed8; }
     .badge-absolute { background:#fef3c7; color:#92400e; }
     .badge-purple { background:#ede9fe; color:#6d28d9; }
+    .mode-cycle-btn { display:inline-flex; flex-direction:column; align-items:flex-start; gap:3px; border:0; background:transparent; padding:0; cursor:pointer; text-align:left; }
+    .mode-cycle-btn .mode-next { color:#6b7280; font-size:11px; line-height:1.2; }
+    .mode-cycle-btn:hover .badge { box-shadow:0 0 0 3px rgba(59,130,246,.16); }
+    .mode-cycle-btn:hover .mode-next { color:#2563eb; }
     .empty-state { padding:32px; text-align:center; color:#9ca3af; background:#fff; border:1px dashed #d1d5db; border-radius:12px; }
     .hint { color:#6b7280; font-size:12px; line-height:1.7; }
     .settings-row { display:grid; grid-template-columns: 220px 1fr; gap:12px; padding:14px 0; border-bottom:1px solid #f3f4f6; align-items:flex-start; }
@@ -2742,7 +2745,7 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
       <div class="modal-body">
         <input id="rejoinOrderId" type="hidden">
         <div class="info-box" id="rejoinInfo">--</div>
-        <div class="field"><label>新队伍码</label><input id="rejoinTeamCode" placeholder="例如 NEW1234"></div>
+        <div class="field"><label>新队伍码</label><input id="rejoinTeamCode" placeholder="例如 ABC1234"></div>
       </div>
       <div class="modal-foot"><button class="btn-sm btn-gray" onclick="closeModal('adminRejoinModal')">取消</button><button class="btn-sm btn-primary" onclick="submitAdminRejoin()">下发换队</button></div>
     </div>
@@ -3177,6 +3180,7 @@ function renderDevicesAdmin(rows) {
     }
     const modeCycleLabel = { machine: '切为机密', hybrid: '切为混合', absolute: '切为绝密' };
     const newModeLabel = modeCycleLabel[nextMode] || '切换模式';
+    const modeCell = `<button class="mode-cycle-btn" onclick="switchMode(${d.id}, decodeURIComponent('${encNextMode}'))" title="点击${esc(newModeLabel)}">${deviceModeBadge(mode, d.running_mode)}<span class="mode-next">${esc(newModeLabel)}</span></button>`;
     const wd = d.watchdog || {};
     let wdBtnAttr = '';
     let wdBtnTitle = '';
@@ -3206,7 +3210,7 @@ function renderDevicesAdmin(rows) {
     return `<tr>
       <td>${esc(d.id)}</td>
       <td><b>${esc(devName)}</b><div class="hint" style="font-family:monospace">${esc(shortKey)}</div></td>
-      <td>${deviceModeBadge(mode, d.running_mode)}</td>
+      <td>${modeCell}</td>
       <td>${onlineBadge(d.online)}</td>
       <td>${workStatusBadge(status, d.cooldown_until_ms || 0)}</td>
       <td>${deviceDetailHtml(d)}</td>
@@ -3405,7 +3409,8 @@ function getManualEffectiveMode() {
   }
   return _manualOrderMode;
 }
-function validateBossName(name) { return /^[A-Z]{3}\\d{4}$/.test(String(name || '').trim()); }
+function normalizeBossName(name) { return String(name || '').trim().toUpperCase().replace(/[\\s-]+/g, ''); }
+function validateBossName(name) { return /^[A-Z]{3}\\d{4}$/.test(normalizeBossName(name)); }
 function appAlert(msg) { toast(msg); }
 function formatMinutes(m) { return fmtMin(m); }
 function updateManualOrderMode() {
@@ -3508,7 +3513,7 @@ function closeManualOrderModal() {
 }
 async function submitManualOrder() {
   const deviceId = document.getElementById('manualDeviceId').value;
-  const bossName = document.getElementById('manualBossName').value.trim().toUpperCase();
+  const bossName = normalizeBossName(document.getElementById('manualBossName').value);
   const hours = parseInt(document.getElementById('manualHours').value) || 0;
   const minutes = parseInt(document.getElementById('manualMinutes').value) || 0;
   const runMinutes = hours * 60 + minutes;
@@ -3516,7 +3521,7 @@ async function submitManualOrder() {
   const maxCoinLossInput = document.getElementById('manualMaxCoinLoss').value.trim();
 
   if (!bossName) { appAlert('请输入组队码'); return; }
-  if (!validateBossName(bossName)) { appAlert('组队码格式错误：前3位为大写字母，后4位为数字（如 ABC1234）'); return; }
+  if (!validateBossName(bossName)) { appAlert('组队码格式错误：前3位为字母，后4位为数字（如 ABC1234）'); return; }
   if (runMinutes <= 0) { appAlert('请填写有效的运行时长'); return; }
   if (maxRoundsInput && !/^\\d+$/.test(maxRoundsInput)) { appAlert('限制局数必须为纯数字'); return; }
   if (maxCoinLossInput && !/^\\d+$/.test(maxCoinLossInput)) { appAlert('限制亏币必须为纯数字'); return; }
@@ -3578,8 +3583,10 @@ function openAdminRejoin(orderId, oldTeam='') {
 }
 async function submitAdminRejoin() {
   const id = $('rejoinOrderId').value;
+  const teamCode = normalizeBossName($('rejoinTeamCode').value);
+  if (!validateBossName(teamCode)) { appAlert('组队码格式错误：前3位为字母，后4位为数字（如 ABC1234）'); return; }
   try {
-    await api('/api/admin/manual-rejoin/' + id, {method:'POST', body:JSON.stringify({boss_name:$('rejoinTeamCode').value.trim()})});
+    await api('/api/admin/manual-rejoin/' + id, {method:'POST', body:JSON.stringify({boss_name:teamCode})});
     closeModal('adminRejoinModal'); toast('换队指令已下发'); await loadDevicesAdmin(); await loadOrders();
   } catch(e) { toast(e.message); }
 }

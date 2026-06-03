@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from html import escape as html_escape
 from html.parser import HTMLParser
 import secrets
@@ -158,6 +159,24 @@ class MerchantError(RuntimeError):
         self.code = code
         self.message = message
         self.status_code = status_code
+
+
+TEAM_CODE_RE = re.compile(r"^[A-Z]{3}\d{4}$")
+TEAM_CODE_FORMAT_MESSAGE = "组队码格式错误：前3位为字母，后4位为数字（如 ABC1234）"
+
+
+def normalize_team_code(value: Any, *, required: bool = True) -> str:
+    # Users often paste the correct team code in lowercase or with a visual
+    # separator from chat/IM. Normalize those harmless variants before
+    # validating so "abc1234", "ABC 1234" and "ABC-1234" all become ABC1234.
+    team_code = re.sub(r"[\s\-]+", "", str(value or "").strip().upper())
+    if not team_code:
+        if required:
+            raise MerchantError("bad_team_code", "组队码不能为空")
+        return ""
+    if not TEAM_CODE_RE.fullmatch(team_code):
+        raise MerchantError("bad_team_code", TEAM_CODE_FORMAT_MESSAGE)
+    return team_code
 
 
 @dataclass
@@ -1537,15 +1556,13 @@ class MerchantService:
         requested_minutes = int(requested_minutes or 0)
         requested_rounds = max(0, int(requested_rounds or 0))
         max_coin_loss = max(0, int(max_coin_loss or 0))
-        team_code = str(team_code or "").strip().upper()
+        team_code = normalize_team_code(team_code)
         quality = str(quality or "standard").strip() or "standard"
         loadout = loadout or {"loadout_type": "default", "items": {}, "total_cost": 0}
         if device_id <= 0:
             raise MerchantError("bad_device", "请选择设备")
         if requested_minutes <= 0 or requested_minutes > (9999 * 60 + 59):
             raise MerchantError("bad_minutes", "手动下单分钟数不合法")
-        if not (3 <= len(team_code) <= 32):
-            raise MerchantError("bad_team_code", "队伍码长度不合法")
         now_s = iso()
         with self.db.connect() as con:
             con.execute("BEGIN IMMEDIATE")
@@ -1623,9 +1640,7 @@ class MerchantService:
             self._raise_bridge_error(e)
 
     def admin_rejoin_order(self, admin: dict[str, Any] | None, order_id: int, team_code: str) -> dict[str, Any]:
-        team_code = str(team_code or "").strip().upper()
-        if team_code and not (3 <= len(team_code) <= 32):
-            raise MerchantError("bad_team_code", "队伍码长度不合法")
+        team_code = normalize_team_code(team_code)
         with self.db.connect() as con:
             row = con.execute(
                 """SELECT o.*, b.control_session_id, b.fencing_token, b.last_device_epoch
@@ -1664,6 +1679,9 @@ class MerchantService:
         maintenance_without_order = {"restart_backup", "cleanup", "restart", "update", "collect_log"}
         if action not in allowed:
             raise MerchantError("bad_command", "不允许的设备指令")
+        params = dict(params or {})
+        if action == "enter_team":
+            params["team_code"] = normalize_team_code(params.get("team_code"))
         with self.db.connect() as con:
             row = self._active_order_by_device_locked(con, device_id)
             if not row and action not in maintenance_without_order:
@@ -1684,7 +1702,7 @@ class MerchantService:
                     sess["control_session_id"],
                     fencing_token=sess["fencing_token"],
                     action=action,
-                    params=params or {},
+                    params=params,
                     expected_device_epoch=int(sess.get("device_epoch") or 0),
                     idem=f"admin-maint-cmd:{device_id}:{action}:{secrets.token_hex(4)}",
                 )
@@ -1705,7 +1723,7 @@ class MerchantService:
                 row["control_session_id"],
                 fencing_token=row["fencing_token"],
                 action=action,
-                params=params or {},
+                params=params,
                 expected_device_epoch=int(row["last_device_epoch"] or 0),
                 idem=f"admin-device-cmd:{row['local_order_no']}:{action}:{secrets.token_hex(4)}",
             )
@@ -1791,9 +1809,7 @@ class MerchantService:
         return self.admin_get_order(order_id)
 
     def customer_rejoin_order(self, order_id: int, customer_id: int, team_code: str) -> dict[str, Any]:
-        team_code = str(team_code or "").strip().upper()
-        if team_code and not (3 <= len(team_code) <= 32):
-            raise MerchantError("bad_team_code", "队伍码长度不合法")
+        team_code = normalize_team_code(team_code)
         with self.db.connect() as con:
             row = con.execute(
                 """SELECT o.*, b.control_session_id, b.fencing_token, b.last_device_epoch
@@ -1831,6 +1847,48 @@ class MerchantService:
                     {"team_code": team_code},
                 )
         return self.admin_get_order(order_id)
+
+    def customer_switch_spectate_order(self, order_id: int, customer_id: int) -> dict[str, Any]:
+        with self.db.connect() as con:
+            row = con.execute(
+                """SELECT o.*, b.control_session_id, b.fencing_token, b.last_device_epoch
+                   FROM local_orders o LEFT JOIN order_control_bindings b ON b.local_order_id=o.id
+                   WHERE o.id=? AND o.customer_id=?""",
+                (order_id, customer_id),
+            ).fetchone()
+            if not row:
+                raise MerchantError("not_found", "订单不存在", 404)
+            if row["status"] not in ACTIVE_ORDER_STATUSES:
+                raise MerchantError("bad_order_status", "订单不在可切换视角状态", 409)
+            if not row["control_session_id"] or not row["fencing_token"]:
+                raise MerchantError("no_active_control_session", "该订单暂无活动控制会话", 409)
+
+        cmd: dict[str, Any] | None = None
+        if hasattr(self.bridge, "queue_command"):
+            try:
+                cmd = self.bridge.queue_command(
+                    row["control_session_id"],
+                    fencing_token=row["fencing_token"],
+                    action="switch_spectate",
+                    params={"operator": "customer"},
+                    expected_device_epoch=int(row["last_device_epoch"] or 0),
+                    idem=f"customer-switch-spectate:{row['local_order_no']}:{secrets.token_hex(4)}",
+                )
+            except BridgeClientError as e:
+                self._raise_bridge_error(e)
+
+        with self.db.connect() as con:
+            customer_row = con.execute("SELECT username FROM customers WHERE id=?", (customer_id,)).fetchone()
+            self._log_customer_action_locked(
+                con,
+                customer_id,
+                customer_row["username"] if customer_row else None,
+                "customer_switch_spectate_request",
+                "order",
+                order_id,
+                {"command_id": (cmd or {}).get("command_id"), "queued": bool(cmd)},
+            )
+        return {"order": self.admin_get_order(order_id), "command": cmd}
 
     # ---------- merchant admin / settings ----------
     def ensure_default_admin(self, username: str, password: str) -> None:
@@ -2628,7 +2686,7 @@ class MerchantService:
     def place_order(self, customer_id: int, *, requested_minutes: int, team_code: str, quality: str = "standard", requested_rounds: int = 0, idempotency_key: str | None = None) -> dict[str, Any]:
         requested_minutes = int(requested_minutes or 0)
         requested_rounds = max(0, int(requested_rounds or 0))
-        team_code = str(team_code or "").strip().upper()
+        team_code = normalize_team_code(team_code)
         quality = str(quality or "standard").strip() or "standard"
         balance_mode = self._mode_from_quality(quality)
         minutes_col, rounds_col = self._mode_balance_columns(balance_mode)
@@ -2636,8 +2694,6 @@ class MerchantService:
             raise MerchantError("bad_minutes", "购买分钟数不合法")
         if requested_rounds > 10000:
             raise MerchantError("bad_rounds", "战损局数不合法")
-        if not (3 <= len(team_code) <= 32):
-            raise MerchantError("bad_team_code", "队伍码长度不合法")
         payload_hash = request_hash({"requested_minutes": requested_minutes, "requested_rounds": requested_rounds, "team_code": team_code, "quality": quality})
         scope = f"order:create:{customer_id}"
         if idempotency_key:

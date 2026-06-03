@@ -337,7 +337,7 @@ def test_order_expire_sends_stop_and_stop_success_finishes(app_and_bridge):
     register_and_login(client)
     service.add_recharge_card("CARD-5", minutes=5)
     client.post("/api/recharge/redeem", json={"code": "CARD-5"})
-    order = client.post("/api/orders", json={"requested_minutes": 1, "team_code": "ABC123"}).json()["order"]
+    order = client.post("/api/orders", json={"requested_minutes": 1, "team_code": "ABC1234"}).json()["order"]
     bridge.push_ready(order["binding"]["control_session_id"])
     client.post("/internal/workers/events")
 
@@ -361,7 +361,7 @@ def test_event_replay_does_not_double_refund(app_and_bridge):
     customer = register_and_login(client)
     app.state.service.add_recharge_card("CARD-20", minutes=20)
     client.post("/api/recharge/redeem", json={"code": "CARD-20"})
-    order = client.post("/api/orders", json={"requested_minutes": 10, "team_code": "REPLAY"}).json()["order"]
+    order = client.post("/api/orders", json={"requested_minutes": 10, "team_code": "REP1234"}).json()["order"]
     ev = bridge.push_admin_takeover(order["binding"]["control_session_id"])
     app.state.service.process_bridge_event(ev)
     app.state.service.process_bridge_event(ev)
@@ -376,7 +376,7 @@ def test_disconnect_expired_event_compensates_order(app_and_bridge):
     customer = register_and_login(client)
     app.state.service.add_recharge_card("CARD-40", minutes=40)
     client.post("/api/recharge/redeem", json={"code": "CARD-40"})
-    order = client.post("/api/orders", json={"requested_minutes": 15, "team_code": "DISC1"}).json()["order"]
+    order = client.post("/api/orders", json={"requested_minutes": 15, "team_code": "DIS1234"}).json()["order"]
     ev = bridge.push_expired(order["binding"]["control_session_id"])
     app.state.service.process_bridge_event(ev)
     assert app.state.service.get_customer(customer["id"])["balance_minutes"] == 40
@@ -389,7 +389,7 @@ def test_snowserver_external_events_start_timer_and_interrupt(app_and_bridge):
     customer = register_and_login(client)
     app.state.service.add_recharge_card("CARD-35", minutes=35)
     client.post("/api/recharge/redeem", json={"code": "CARD-35"})
-    order = client.post("/api/orders", json={"requested_minutes": 10, "team_code": "EXTDONE"}).json()["order"]
+    order = client.post("/api/orders", json={"requested_minutes": 10, "team_code": "EXT1234"}).json()["order"]
     sid = order["binding"]["control_session_id"]
     with app.state.db.connect() as con:
         watch_cmd = con.execute("SELECT last_command_id FROM order_control_bindings WHERE control_session_id=?", (sid,)).fetchone()["last_command_id"]
@@ -570,7 +570,7 @@ def test_live_snowserver_slim_external_bridge_integration(tmp_path, monkeypatch)
     merchant_app.state.service.add_recharge_card("CARD-CENTRAL-30", minutes=30)
     assert merchant.post("/api/recharge/redeem", json={"code": "CARD-CENTRAL-30"}).status_code == 200
 
-    ordered = merchant.post("/api/orders", json={"requested_minutes": 10, "team_code": "CEN123"}).json()["order"]
+    ordered = merchant.post("/api/orders", json={"requested_minutes": 10, "team_code": "CEN1234"}).json()["order"]
     assert ordered["status"] == "waiting_ready_timer"
     claim = central.post("/api/machine/jobs/claim", json={"machine_id": dev["device_key"], "capacity": 10}).json()
     jobs = [j for j in claim["jobs"] if j["payload"].get("external_session_id") == ordered["binding"]["control_session_id"]]
@@ -605,7 +605,7 @@ def test_same_customer_duplicate_click_reuses_active_order(tmp_path):
     service.redeem_card(customer["id"], "DUP-100")
 
     def place(i: int):
-        return service.place_order(customer["id"], requested_minutes=10, team_code="DUP123", idempotency_key=f"click-{i}")
+        return service.place_order(customer["id"], requested_minutes=10, team_code="DUP1234", idempotency_key=f"click-{i}")
 
     with ThreadPoolExecutor(max_workers=20) as pool:
         results = list(pool.map(place, range(20)))
@@ -627,7 +627,7 @@ def test_50_concurrent_customers_compete_for_two_devices(tmp_path):
         customers.append(c)
 
     def place(c):
-        return service.place_order(c["id"], requested_minutes=10, team_code=f"TEAM{c['id']}")
+        return service.place_order(c["id"], requested_minutes=10, team_code=f"TAA{int(c['id']) % 10000:04d}")
 
     with ThreadPoolExecutor(max_workers=50) as pool:
         results = list(pool.map(place, customers))
@@ -647,7 +647,7 @@ def test_session_renew_worker(app_and_bridge):
     register_and_login(client)
     app.state.service.add_recharge_card("CARD-60", minutes=60)
     client.post("/api/recharge/redeem", json={"code": "CARD-60"})
-    order = client.post("/api/orders", json={"requested_minutes": 10, "team_code": "RNW1"}).json()["order"]
+    order = client.post("/api/orders", json={"requested_minutes": 10, "team_code": "RNW1234"}).json()["order"]
     bridge.push_ready(order["binding"]["control_session_id"])
     client.post("/internal/workers/events")
     res = client.post("/internal/workers/session-renew").json()
@@ -697,8 +697,8 @@ def test_admin_settings_privacy_announcement_and_maintenance(app_and_bridge):
     register_and_login(client, "privacy_user")
     app.state.service.add_recharge_card("PRIV-10", minutes=10)
     client.post("/api/recharge/redeem", json={"code": "PRIV-10"})
-    order = client.post("/api/orders", json={"requested_minutes": 5, "team_code": "SECRETTEAM"}).json()["order"]
-    assert order["team_code"] != "SECRETTEAM"
+    order = client.post("/api/orders", json={"requested_minutes": 5, "team_code": "SEC1234"}).json()["order"]
+    assert order["team_code"] != "SEC1234"
     assert order["team_code_masked"] is True
     assert "fencing_token" not in order["binding"]
     assert "merchant_context_ref" not in order["binding"]
@@ -717,7 +717,7 @@ def test_admin_settings_privacy_announcement_and_maintenance(app_and_bridge):
     register_and_login(client, "blocked_user")
     app.state.service.add_recharge_card("MAINT-10", minutes=10)
     client.post("/api/recharge/redeem", json={"code": "MAINT-10"})
-    blocked = client.post("/api/orders", json={"requested_minutes": 5, "team_code": "MAINT"})
+    blocked = client.post("/api/orders", json={"requested_minutes": 5, "team_code": "MAI1234"})
     assert blocked.status_code == 503
     assert blocked.json()["error"] == "maintenance_mode"
     assert blocked.json()["message"] == "系统升级中，预计 22:00 恢复"
@@ -817,7 +817,7 @@ def test_customer_usage_settings_are_merchant_owned_and_applied(app_and_bridge):
     register_and_login(user_client, "policy_user")
     app.state.service.add_recharge_card("POLICY-60", minutes=60, mode="absolute")
     assert user_client.post("/api/recharge/redeem", json={"code": "POLICY-60"}).status_code == 200
-    order = user_client.post("/api/orders", json={"requested_minutes": 10, "team_code": "POLICY", "quality": "secret"}).json()["order"]
+    order = user_client.post("/api/orders", json={"requested_minutes": 10, "team_code": "POL1234", "quality": "secret"}).json()["order"]
     assert order["status"] == "waiting_ready_timer"
 
     policy = bridge.session_requests[-1]["selection_policy"]
@@ -888,7 +888,9 @@ def test_html_pages_escape_user_controlled_values(app_and_bridge):
     register_and_login(client, "<b>evil</b>")
     app.state.service.add_recharge_card("ESC-10", minutes=10)
     client.post("/api/recharge/redeem", json={"code": "ESC-10"})
-    client.post("/api/orders", json={"requested_minutes": 5, "team_code": "<TAG>"})
+    rejected = client.post("/api/orders", json={"requested_minutes": 5, "team_code": "<TAG>"})
+    assert rejected.status_code == 400
+    assert rejected.json()["error"] == "bad_team_code"
 
     home = client.get("/").text
     current = client.get("/orders/current").text
@@ -897,7 +899,6 @@ def test_html_pages_escape_user_controlled_values(app_and_bridge):
     assert "<b>evil</b>" not in home
     assert "&lt;b&gt;evil&lt;/b&gt;" in home
     assert "<TAG>" not in current
-    assert "&lt;TAG&gt;" in current
     assert "<TAG>" not in history
 
 
@@ -983,7 +984,7 @@ def test_admin_customer_and_order_management_surfaces(app_and_bridge):
     online = admin_client.get("/api/admin/customers?online_only=true").json()["customers"]
     assert any(c["id"] == customer["id"] and c["online"] for c in online)
 
-    order = user_client.post("/api/orders", json={"requested_minutes": 10, "team_code": "MGD123"}).json()["order"]
+    order = user_client.post("/api/orders", json={"requested_minutes": 10, "team_code": "MGD1234"}).json()["order"]
     bridge.push_ready(order["binding"]["control_session_id"])
     user_client.post("/internal/workers/events")
 
@@ -1045,6 +1046,8 @@ def test_legacy_customer_login_portal_and_api_compatibility(app_and_bridge):
     assert "卡密充值" in customer_html
     assert "/api/devices/status" in customer_html
     assert "/api/orders/mine" in customer_html
+    assert "normalizeBossName" in customer_html
+    assert "切换视角" in customer_html
 
     app.state.service.add_recharge_card("LEGACY-CARD", minutes=30, rounds=2)
     recharge = client.post("/api/recharge", json={"card_code": "LEGACY-CARD"})
@@ -1123,18 +1126,26 @@ def test_legacy_customer_login_portal_and_api_compatibility(app_and_bridge):
     assert other_running["running_user_id"] == 9991
     assert other_running["spectate_boss"] == ""
 
-    order = client.post("/api/order", json={"boss_name": "ABC1234", "mode": "machine"})
+    order = client.post("/api/order", json={"boss_name": "abc-1234", "mode": "machine"})
     assert order.status_code == 200, order.text
     payload = order.json()
     assert payload["run_minutes"] == 30
     assert payload["run_rounds"] == 2
+    assert payload["order"]["boss_name"] == "ABC1234"
     order_id = payload["order_id"]
     mine = client.get("/api/orders/mine").json()["orders"]
     assert any(o["id"] == order_id and o["boss_name"] == "ABC1234" and o["status"] == "running" for o in mine)
 
-    rejoin = client.post(f"/api/order/{order_id}/rejoin", json={"boss_name": "DEF1234"})
+    rejoin = client.post(f"/api/order/{order_id}/rejoin", json={"boss_name": "def 1234"})
     assert rejoin.status_code == 200, rejoin.text
     assert rejoin.json()["order"]["boss_name"] == "DEF1234"
+    assert bridge.commands[-1]["action"] == "enter_team"
+    assert bridge.commands[-1]["params"]["team_code"] == "DEF1234"
+
+    switched = client.post(f"/api/order/{order_id}/switch_spectate")
+    assert switched.status_code == 200, switched.text
+    assert switched.json()["msg"] == "已下发切换视角指令"
+    assert bridge.commands[-1]["action"] == "switch_spectate"
 
     stopped = client.post(f"/api/order/{order_id}/stop")
     assert stopped.status_code == 200, stopped.text
@@ -1165,7 +1176,7 @@ def test_customer_online_uses_token_or_active_order_and_records_activity(app_and
     online = admin.get("/api/admin/customers?online_only=true").json()["customers"]
     assert any(c["id"] == customer["id"] and c["online"] and "token" in c["online_reason"] for c in online)
 
-    order = user.post("/api/orders", json={"requested_minutes": 10, "team_code": "PRS123"}).json()["order"]
+    order = user.post("/api/orders", json={"requested_minutes": 10, "team_code": "PRS1234"}).json()["order"]
     bridge.push_ready(order["binding"]["control_session_id"])
     user.post("/internal/workers/events")
     with app.state.db.connect() as con:
@@ -1199,8 +1210,8 @@ def test_customer_actions_are_written_to_audit_log(app_and_bridge):
 
     app.state.service.add_recharge_card("AUDIT-CARD", minutes=60, rounds=4)
     assert user.post("/api/recharge", json={"card_code": "AUDIT-CARD"}).status_code == 200
-    order = user.post("/api/orders", json={"requested_minutes": 10, "requested_rounds": 1, "team_code": "AUD123"}).json()["order"]
-    assert user.post(f"/api/order/{order['id']}/rejoin", json={"boss_name": "AUD456"}).status_code == 200
+    order = user.post("/api/orders", json={"requested_minutes": 10, "requested_rounds": 1, "team_code": "AUD1234"}).json()["order"]
+    assert user.post(f"/api/order/{order['id']}/rejoin", json={"boss_name": "AUD4567"}).status_code == 200
     assert user.post(f"/api/order/{order['id']}/restart_backup").status_code == 200
     assert user.post(f"/api/order/{order['id']}/switch_spectate").status_code == 200
     assert user.post(f"/api/order/{order['id']}/stop").status_code == 200
@@ -1225,7 +1236,7 @@ def test_customer_actions_are_written_to_audit_log(app_and_bridge):
     order_log = next(l for l in customer_logs if l["action"] == "customer_order_create")
     assert order_log["resource_type"] == "order"
     assert order_log["resource_id"] == str(order["id"])
-    assert order_log["metadata"]["team_code"] == "AUD123"
+    assert order_log["metadata"]["team_code"] == "AUD1234"
 
 
 def test_setup_wizard_skipped_by_default_for_testing(tmp_path):
@@ -1444,6 +1455,8 @@ def test_admin_device_code_and_mode_management(app_and_bridge):
         "删除设备",
         "copyOrOpenDeviceRadarUrl",
         "toggleDropdown",
+        "mode-cycle-btn",
+        "mode-next",
         "restartDevice",
         "restartBackupPC",
         "updateDevice",
@@ -1538,7 +1551,7 @@ def test_admin_devices_reuse_legacy_runtime_fields(app_and_bridge):
             "runtime": {
                 "work_status": "已进队",
                 "boss_id": "BOSS7788",
-                "running_boss_name": "TEAM7777",
+                "running_boss_name": "TEA7777",
                 "harvard": "88.5W",
                 "round_count": 2,
                 "max_rounds": 5,
@@ -1554,8 +1567,8 @@ def test_admin_devices_reuse_legacy_runtime_fields(app_and_bridge):
     assert row["work_status"] == "已进队"
     assert row["spectate_boss"] == "BOSS7788"
     assert row["boss_id"] == "BOSS7788"
-    assert row["running_boss_name"] == "TEAM7777"
-    assert row["team_code"] == "TEAM7777"
+    assert row["running_boss_name"] == "TEA7777"
+    assert row["team_code"] == "TEA7777"
     assert row["harvard"] == "88.5W"
     assert row["round_count"] == 2
 
@@ -1583,7 +1596,7 @@ def test_manual_order_same_device_concurrency_guard(tmp_path):
 
     def place(i: int):
         try:
-            return ("ok", service.admin_manual_order(admin, device_id=1, requested_minutes=5, requested_rounds=0, team_code=f"MNL{i:03d}", quality="standard"))
+            return ("ok", service.admin_manual_order(admin, device_id=1, requested_minutes=5, requested_rounds=0, team_code=f"MNL{i:04d}", quality="standard"))
         except MerchantError as e:
             return ("err", e.code)
 
@@ -1638,7 +1651,7 @@ def test_customer_unsafe_posts_reject_cross_origin(app_and_bridge):
     rejected = client.post(
         "/api/orders",
         headers={"Origin": "http://evil.example"},
-        json={"requested_minutes": 5, "team_code": "ORIGIN"},
+        json={"requested_minutes": 5, "team_code": "ORG1234"},
     )
     assert rejected.status_code == 403
     assert rejected.json()["error"] == "bad_origin"
@@ -1654,7 +1667,7 @@ def test_customer_unsafe_posts_reject_cross_origin(app_and_bridge):
     allowed = client.post(
         "/api/orders",
         headers={"Origin": "http://testserver"},
-        json={"requested_minutes": 5, "team_code": "SAFEORG"},
+        json={"requested_minutes": 5, "team_code": "SAF1234"},
     )
     assert allowed.status_code == 200, allowed.text
 

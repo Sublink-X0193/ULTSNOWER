@@ -2395,9 +2395,9 @@
         }
 
         async function submitAutoOrder() {
-            const bossName = document.getElementById('orderBossName').value.trim();
+            const bossName = normalizeBossName(document.getElementById('orderBossName').value);
             if (!bossName) return appAlert('请输入组队码');
-            if (!validateBossName(bossName)) return appAlert('组队码格式错误：前3位为大写字母，后4位为数字（如 ABC1234）');
+            if (!validateBossName(bossName)) return appAlert('组队码格式错误：前3位为字母，后4位为数字（如 ABC1234）');
 
             let loadoutType = 'default';
             let loadoutHelmet = '', loadoutArmor = '', loadoutRig = '', loadoutPistol = '', loadoutBackpack = '';
@@ -2642,18 +2642,19 @@
             selectedDevice = null;
         }
 
+        function normalizeBossName(name) {
+            return String(name || '').trim().toUpperCase().replace(/[\s-]+/g, '');
+        }
+
         function validateBossName(name) {
-            if (name.length !== 7) return false;
-            if (!/^[A-Z]{3}/.test(name)) return false;
-            if (!/\d{4}$/.test(name)) return false;
-            return true;
+            return /^[A-Z]{3}\d{4}$/.test(normalizeBossName(name));
         }
 
         async function submitOrder() {
             if (!selectedDevice) return;
-            const bossName = document.getElementById('orderBossName').value.trim();
+            const bossName = normalizeBossName(document.getElementById('orderBossName').value);
             if (!bossName) return appAlert('请输入组队码');
-            if (!validateBossName(bossName)) return appAlert('组队码格式错误：前3位为大写字母，后4位为数字（如 ABC1234）');
+            if (!validateBossName(bossName)) return appAlert('组队码格式错误：前3位为字母，后4位为数字（如 ABC1234）');
 
             // 配装数据
             let loadoutType = 'default';
@@ -2845,10 +2846,7 @@
                         const validId = Number.isFinite(oid) && oid > 0;
                         const stopBtn = (currentRole === 'night_card' || !validId) ? '' : `<button class="btn-sm btn-danger" onclick="stopOrder(${oid})">结束</button> `;
                         const switchBtn = (currentRole === 'night_card' && validId) ? `<button class="btn-sm btn-amber" onclick="openSwitchDeviceModal(${oid})">换机</button> ` : '';
-                        let spectateBtn = '';
-                        if (o.device_work_status === '等待救援' && validId) {
-                            spectateBtn = `<button class="btn-sm btn-amber" onclick="switchSpectate(${oid})" style="margin-left:4px;">切换观战</button>`;
-                        }
+                        const spectateBtn = validId ? `<button class="btn-sm btn-amber" onclick="switchSpectate(${oid})" style="margin-left:4px;">切换视角</button>` : '';
                         const rejoinBtn = validId ? `<button class="btn-sm btn-primary" onclick="rejoinOrder(${oid})">更换队伍</button>` : '';
                         // 备用电脑：仅在该订单的设备绑定了备用电脑、且备用电脑当前在线时显示
                         let backupBtn = '';
@@ -2955,15 +2953,16 @@
         async function rejoinOrder(orderId) {
             const newBoss = await appPrompt({
                 title: '更换组队码',
-                text: '请输入新的组队码（前3位大写字母+后4位数字，如ABC1234）：',
+                text: '请输入新的组队码（前3位字母+后4位数字，如ABC1234）：',
                 placeholder: 'ABC1234',
             });
-            if (!newBoss || !newBoss.trim()) return;
-            if (!validateBossName(newBoss.trim())) return appAlert('组队码格式错误：前3位为大写字母，后4位为数字（如 ABC1234）');
+            const normalizedBoss = normalizeBossName(newBoss);
+            if (!normalizedBoss) return;
+            if (!validateBossName(normalizedBoss)) return appAlert('组队码格式错误：前3位为字母，后4位为数字（如 ABC1234）');
 
             const ok = await appConfirm({
                 title: '更换队伍',
-                text: `确定要更换队伍？将退出当前队伍，30秒后以新组队码「${newBoss.trim()}」重新加入。`,
+                text: `确定要更换队伍？将退出当前队伍，30秒后以新组队码「${normalizedBoss}」重新加入。`,
                 okText: '确认更换',
                 okClass: 'btn-primary',
             });
@@ -2973,7 +2972,7 @@
                 const res = await fetch(`/api/order/${orderId}/rejoin`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ boss_name: newBoss.trim() })
+                    body: JSON.stringify({ boss_name: normalizedBoss })
                 });
                 const data = await res.json();
 
@@ -3076,11 +3075,11 @@
             }
             _switchOrderId = oid;
             const deviceId = document.getElementById('switchDeviceSelect').value;
-            const bossName = document.getElementById('switchBossName').value.trim();
+            const bossName = normalizeBossName(document.getElementById('switchBossName').value);
 
             if (!deviceId) return appAlert('请选择目标设备');
             if (!bossName) return appAlert('请输入新组队码');
-            if (!validateBossName(bossName)) return appAlert('组队码格式错误：前3位为大写字母，后4位为数字（如 ABC1234）');
+            if (!validateBossName(bossName)) return appAlert('组队码格式错误：前3位为字母，后4位为数字（如 ABC1234）');
 
             const ok = await appConfirm({
                 title: '确认换机',
