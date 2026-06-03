@@ -960,6 +960,10 @@ def test_admin_customer_and_order_management_surfaces(app_and_bridge):
     assert "所有客户预览 / 账户管理" in html
     assert "目前在线客户预览" in html
     assert "订单管理 / 剩余时长显示修改" in html
+    assert 'id="customerOnlineOnlyBtn"' in html
+    assert "toggleCustomerOnlineOnly()" in html
+    assert "当前仅显示在线客户" in html
+    assert "暂无在线客户" in html
 
 
 def test_legacy_customer_login_portal_and_api_compatibility(app_and_bridge):

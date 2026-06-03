@@ -1861,6 +1861,7 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
     .btn-green { background:#22c55e; color:#fff; } .btn-green:hover{background:#16a34a}
     .btn-purple { background:#7c3aed; color:#fff; } .btn-purple:hover{background:#6d28d9}
     .btn-amber { background:#f59e0b; color:#fff; } .btn-amber:hover{background:#d97706}
+    .btn-sm.active { box-shadow:0 0 0 3px rgba(34,197,94,.18); }
     .dropdown { position: relative; display: inline-block; }
     .dropdown-menu { display: none; position: absolute; right: 0; top: 100%; background:#fff; border:1px solid #e5e7eb; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,.1); min-width:120px; z-index:50; padding:4px 0; }
     .dropdown-menu.up { top:auto; bottom:100%; box-shadow:0 -4px 12px rgba(0,0,0,.1); }
@@ -2020,8 +2021,9 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
       <div class="toolbar">
         <input id="customerKeyword" placeholder="搜索用户名 / 状态 / 订单" onkeydown="if(event.key==='Enter')loadCustomers()">
         <button class="btn-sm btn-gray" onclick="loadCustomers()">搜索</button>
-        <button class="btn-sm btn-green" onclick="loadCustomers('', true)">只看在线</button>
+        <button id="customerOnlineOnlyBtn" class="btn-sm btn-gray" onclick="toggleCustomerOnlineOnly()" aria-pressed="false">只看在线</button>
       </div>
+      <div id="customerFilterHint" class="hint" style="margin:-6px 0 10px"></div>
       <div id="customersTable"></div>
     </div>
 
@@ -2565,6 +2567,7 @@ const IS_OWNER = CURRENT_ADMIN_ROLE === 'owner';
 let _defaultLimitRounds = 4;
 let _absoluteRoundsPerHour = 3;
 let _equipmentRows = [];
+let customerOnlineOnly = false;
 async function api(path, opts={}) {
   const headers = {'Content-Type':'application/json', ...(opts.headers || {})};
   delete opts.headers;
@@ -2684,15 +2687,37 @@ function renderOrderAnalytics(a) {
 }
 async function loadOnline(target='onlineTable') {
   const d = await api('/api/admin/customers?online_only=true');
-  renderCustomers(d.customers, target);
+  renderCustomers(d.customers || [], target, {emptyText:'暂无在线客户'});
 }
-async function loadCustomers(keyword, onlineOnly=false) {
+function updateCustomerFilterUi(rowCount) {
+  const btn = $('customerOnlineOnlyBtn');
+  if (btn) {
+    btn.className = 'btn-sm ' + (customerOnlineOnly ? 'btn-green active' : 'btn-gray');
+    btn.textContent = customerOnlineOnly ? '显示全部' : '只看在线';
+    btn.setAttribute('aria-pressed', customerOnlineOnly ? 'true' : 'false');
+    btn.title = customerOnlineOnly ? '当前仅显示在线客户，点击恢复全部客户' : '点击后仅显示在线客户';
+  }
+  const hint = $('customerFilterHint');
+  if (hint) {
+    hint.textContent = customerOnlineOnly ? `当前仅显示在线客户（${Number(rowCount || 0)} 个），点击“显示全部”恢复。` : '';
+  }
+}
+async function toggleCustomerOnlineOnly() {
+  customerOnlineOnly = !customerOnlineOnly;
+  await loadCustomers(undefined, customerOnlineOnly);
+}
+async function loadCustomers(keyword, onlineOnly) {
+  if (typeof onlineOnly === 'boolean') customerOnlineOnly = onlineOnly;
   const q = keyword ?? $('customerKeyword')?.value ?? '';
-  const d = await api('/api/admin/customers?keyword=' + encodeURIComponent(q) + '&online_only=' + (onlineOnly ? 'true':'false'));
-  renderCustomers(d.customers, 'customersTable');
+  const d = await api('/api/admin/customers?keyword=' + encodeURIComponent(q) + '&online_only=' + (customerOnlineOnly ? 'true':'false'));
+  const rows = d.customers || [];
+  updateCustomerFilterUi(rows.length);
+  renderCustomers(rows, 'customersTable', {emptyText: customerOnlineOnly ? '暂无在线客户' : '暂无客户'});
 }
-function renderCustomers(rows, target) {
-  if (!rows.length) { $(target).innerHTML = '<div class="empty-state">暂无客户</div>'; return; }
+function renderCustomers(rows, target, options={}) {
+  rows = rows || [];
+  const emptyText = options.emptyText || '暂无客户';
+  if (!rows.length) { $(target).innerHTML = `<div class="empty-state">${esc(emptyText)}</div>`; return; }
   const balanceCell = (label, minutes, rounds) => `<div><span class="badge ${label === '机密' ? 'badge-machine' : 'badge-absolute'}">${label}</span> <b>${fmtMin(minutes)}</b></div><div class="hint">局数：${esc(rounds || 0)}</div>`;
   $(target).innerHTML = `<table class="data-table"><thead><tr>
     <th>ID</th><th>客户</th><th>在线</th><th>状态</th><th>机密余额</th><th>绝密余额</th><th>当前订单</th><th>最后在线</th><th>操作</th>
