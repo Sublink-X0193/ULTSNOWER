@@ -2187,8 +2187,8 @@ def _admin_dashboard_html(admin: dict[str, Any], settings: dict[str, Any] | None
         </div>
         <div class="field">
           <label>全局备注地址</label>
-          <input type="text" id="settingGlobalRadarUrl" placeholder="http://8.148.233.14:5000/" />
-          <div class="hint">如果设置，所有客户下单后显示此备注地址（优先级高于设备备注地址）</div>
+          <input type="text" id="settingGlobalRadarUrl" placeholder="可留空；例如：https://example.com/radar" />
+          <div class="hint">默认不设置全局备注地址；仅填写后，客户下单后才显示此地址（优先级高于设备备注地址）</div>
         </div>
         <div class="field">
           <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
@@ -3713,7 +3713,7 @@ async function loadSettings() {
       globalRadarInput.disabled = true;
       globalRadarInput.dataset.locked = '1';
     } else {
-      globalRadarInput.value = s.global_radar_url || 'http://8.148.233.14:5000/';
+      globalRadarInput.value = s.global_radar_url || '';
       globalRadarInput.readOnly = false;
       globalRadarInput.disabled = false;
       globalRadarInput.dataset.locked = '';

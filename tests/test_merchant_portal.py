@@ -760,6 +760,7 @@ def test_admin_settings_legacy_ui_and_post_compatibility(app_and_bridge):
     assert 'id="settingPrivacyMode"' in html
     assert 'id="settingMaintenanceMode"' in html
     assert 'id="nightTimeRangeField"' in html
+    assert "http://8.148.233.14:5000/" not in html
     assert "系统设置" in html
 
     posted = client.post(
@@ -772,7 +773,7 @@ def test_admin_settings_legacy_ui_and_post_compatibility(app_and_bridge):
             "ace_enabled": "1",
             "default_limit_rounds": "6",
             "absolute_rounds_per_hour": "2",
-            "global_radar_url": "http://8.148.233.14:5000/",
+            "global_radar_url": "https://radar.example.test/",
         },
     )
     assert posted.status_code == 200, posted.text
