@@ -106,7 +106,7 @@ DELETE /api/external/v1/devices/{device_id}
 可以传：
 
 - `merchant_context_ref`：HMAC 后的 opaque 引用。
-- `team_code`
+- `team_code`：必须是 `^[A-Z]{3}\d{4}$`，即 3 位大写字母 + 4 位数字，例如 `ABC1234`；商户侧先校验，避免把无效队伍码打到中央。
 - `quality/loadout_id`
 - `selection_policy`：商户下单时的设备选择策略，只包含设备筛选条件，例如：
   - `order_quality`

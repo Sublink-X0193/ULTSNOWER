@@ -10,6 +10,7 @@ venv/
 
 # runtime data
 /data/
+logs/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
