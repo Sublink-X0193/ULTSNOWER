@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -288,14 +289,14 @@ def test_shared_login_allows_admin_and_blocks_customer_admin_name(app_and_bridge
     assert old_admin_login.status_code == 303
     assert old_admin_login.headers["location"] == "/login"
 
-    api_admin = client.post("/api/login", json={"username": "admin", "password": "admin123456"})
+    api_admin = client.post("/api/login", json={"username": "admin", "password": "change_me_before_production"})
     assert api_admin.status_code == 200, api_admin.text
     assert api_admin.json()["role"] == "admin"
     assert api_admin.json()["redirect"] == "/merchant-admin"
     assert client.get("/merchant-admin").status_code == 200
 
     form_admin = TestClient(app)
-    posted = form_admin.post("/login", data={"username": "admin", "password": "admin123456"}, follow_redirects=False)
+    posted = form_admin.post("/login", data={"username": "admin", "password": "change_me_before_production"}, follow_redirects=False)
     assert posted.status_code == 303
     assert posted.headers["location"] == "/merchant-admin"
 
@@ -502,6 +503,9 @@ def test_bridge_client_external_device_management_paths():
 
 
 def test_live_snowserver_slim_external_bridge_integration(tmp_path, monkeypatch):
+    if os.environ.get("RUN_LIVE_SNOWSERVER_TESTS") not in {"1", "true", "TRUE", "yes"}:
+        pytest.skip("set RUN_LIVE_SNOWSERVER_TESTS=1 to run live SNOWSERVER integration tests")
+
     central_root = os.environ.get("SNOWSERVER_REPO", r"C:\Users\WS\Documents\SNOWSERVER")
     if not os.path.exists(os.path.join(central_root, "snow_mock_server", "app", "main.py")):
         pytest.skip("SNOWSERVER repo not available")
@@ -659,7 +663,7 @@ def test_admin_settings_privacy_announcement_and_maintenance(app_and_bridge):
     app, _bridge = app_and_bridge
     client = TestClient(app)
 
-    login = client.post("/api/admin/login", json={"username": "admin", "password": "admin123456"})
+    login = client.post("/api/admin/login", json={"username": "admin", "password": "change_me_before_production"})
     assert login.status_code == 200, login.text
     saved = client.put(
         "/api/admin/settings",
@@ -670,7 +674,7 @@ def test_admin_settings_privacy_announcement_and_maintenance(app_and_bridge):
             "night_time_check": True,
             "night_start_time": "22:50",
             "night_end_time": "06:10",
-            "global_radar_url": "https://example.local/radar",
+            "global_radar_url": "https://radar.example.test/radar",
             "privacy_skip_balance": 12,
             "ace_enabled": True,
             "privacy_mode_enabled": True,
@@ -684,13 +688,13 @@ def test_admin_settings_privacy_announcement_and_maintenance(app_and_bridge):
     assert public_settings["system_name"] == "SNOW 商户自助"
     assert public_settings["privacy_mode_enabled"] is True
     assert public_settings["announcement_text"] == "今晚 22:00 维护"
-    assert public_settings["global_radar_url"] == "https://example.local/radar"
+    assert public_settings["global_radar_url"] == "https://radar.example.test/radar"
     assert public_settings["night_start_time"] == "22:50"
     admin_settings = client.get("/api/admin/settings").json()["settings"]
     assert admin_settings["default_limit_rounds"] == 5
     assert admin_settings["absolute_rounds_per_hour"] == 3
     assert admin_settings["night_time_check"] is True
-    assert admin_settings["global_radar_url"] == "https://example.local/radar"
+    assert admin_settings["global_radar_url"] == "https://radar.example.test/radar"
     assert admin_settings["privacy_skip_balance"] == 12
     assert admin_settings["ace_enabled"] is True
 
@@ -726,7 +730,7 @@ def test_admin_settings_privacy_announcement_and_maintenance(app_and_bridge):
 def test_admin_card_generation_listing_export_and_delete(app_and_bridge):
     app, _bridge = app_and_bridge
     client = TestClient(app)
-    assert client.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+    assert client.post("/api/admin/login", json={"username": "admin", "password": "change_me_before_production"}).status_code == 200
     client.put("/api/admin/settings", json={"default_limit_rounds": 4, "absolute_rounds_per_hour": 3})
 
     gen = client.post("/api/admin/cards/generate", json={"mode": "absolute", "minutes": 120, "count": 2, "card_type": "normal"})
@@ -751,7 +755,7 @@ def test_admin_card_generation_listing_export_and_delete(app_and_bridge):
 def test_admin_settings_legacy_ui_and_post_compatibility(app_and_bridge):
     app, _bridge = app_and_bridge
     client = TestClient(app)
-    assert client.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+    assert client.post("/api/admin/login", json={"username": "admin", "password": "change_me_before_production"}).status_code == 200
 
     html = client.get("/merchant-admin").text
     assert '登录页与注册页显示的系统名称，留空时默认使用"管理员用户名前3位+电竞"' in html
@@ -760,7 +764,7 @@ def test_admin_settings_legacy_ui_and_post_compatibility(app_and_bridge):
     assert 'id="settingPrivacyMode"' in html
     assert 'id="settingMaintenanceMode"' in html
     assert 'id="nightTimeRangeField"' in html
-    assert "http://8.148.233.14:5000/" not in html
+    assert not re.search(r"https?://\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?/", html)
     assert "系统设置" in html
 
     posted = client.post(
@@ -802,7 +806,7 @@ def test_admin_settings_legacy_ui_and_post_compatibility(app_and_bridge):
 def test_customer_usage_settings_are_merchant_owned_and_applied(app_and_bridge):
     app, bridge = app_and_bridge
     admin_client = TestClient(app)
-    assert admin_client.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+    assert admin_client.post("/api/admin/login", json={"username": "admin", "password": "change_me_before_production"}).status_code == 200
     saved = admin_client.post(
         "/api/admin/settings",
         json={
@@ -832,7 +836,7 @@ def test_customer_usage_settings_are_merchant_owned_and_applied(app_and_bridge):
 def test_night_card_time_check_is_enforced_by_merchant_server(app_and_bridge):
     app, _bridge = app_and_bridge
     admin_client = TestClient(app)
-    assert admin_client.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+    assert admin_client.post("/api/admin/login", json={"username": "admin", "password": "change_me_before_production"}).status_code == 200
     local_now = utcnow().astimezone(ZoneInfo("Asia/Shanghai"))
     start = (local_now + timedelta(hours=2)).strftime("%H:%M")
     end = (local_now + timedelta(hours=3)).strftime("%H:%M")
@@ -862,7 +866,7 @@ def test_night_card_time_check_is_enforced_by_merchant_server(app_and_bridge):
 def test_admin_equipment_config_roundtrip(app_and_bridge):
     app, _bridge = app_and_bridge
     client = TestClient(app)
-    assert client.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+    assert client.post("/api/admin/login", json={"username": "admin", "password": "change_me_before_production"}).status_code == 200
 
     cfg = client.get("/api/admin/equipment-config")
     assert cfg.status_code == 200
@@ -905,7 +909,7 @@ def test_html_pages_escape_user_controlled_values(app_and_bridge):
 def test_notice_html_sanitizer_blocks_xss_vectors(app_and_bridge):
     app, _bridge = app_and_bridge
     admin = TestClient(app)
-    assert admin.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+    assert admin.post("/api/admin/login", json={"username": "admin", "password": "change_me_before_production"}).status_code == 200
     payload = """
       <b>保留加粗</b>
       <img src=x onerror=alert(1)>
@@ -929,7 +933,7 @@ def test_bridge_device_mode_is_normalized_before_admin_frontend(app_and_bridge):
     bridge.devices[1]["mode"] = "machine');window.__xss=1;//"
     bridge.devices[1]["display_name"] = "设备<script>alert(1)</script>"
     admin = TestClient(app)
-    assert admin.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+    assert admin.post("/api/admin/login", json={"username": "admin", "password": "change_me_before_production"}).status_code == 200
 
     devices = admin.get("/api/admin/devices").json()["devices"]
     row = next(d for d in devices if d["id"] == 1)
@@ -943,7 +947,7 @@ def test_bridge_device_mode_is_normalized_before_admin_frontend(app_and_bridge):
 def test_admin_customer_and_order_management_surfaces(app_and_bridge):
     app, bridge = app_and_bridge
     admin_client = TestClient(app)
-    assert admin_client.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+    assert admin_client.post("/api/admin/login", json={"username": "admin", "password": "change_me_before_production"}).status_code == 200
 
     created = admin_client.post("/api/admin/customers", json={"username": "managed", "password": "123456", "balance_minutes": 60})
     assert created.status_code == 200, created.text
@@ -1008,7 +1012,7 @@ def test_admin_customer_and_order_management_surfaces(app_and_bridge):
 def test_admin_can_delete_logged_in_customer_without_history(app_and_bridge):
     app, _bridge = app_and_bridge
     admin = TestClient(app)
-    assert admin.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+    assert admin.post("/api/admin/login", json={"username": "admin", "password": "change_me_before_production"}).status_code == 200
     created = admin.post("/api/admin/customers", json={"username": "delete_me", "password": "123456", "balance_minutes": 0})
     customer = created.json()["customer"]
 
@@ -1086,7 +1090,7 @@ def test_legacy_customer_login_portal_and_api_compatibility(app_and_bridge):
             "running_boss_name": "OTHER123",
             "boss_id": "OTHER123",
             "boss_id_debug": "debug-secret",
-            "radar_url": "https://radar.internal/hidden",
+            "radar_url": "https://radar.example.test/hidden",
             "last_heartbeat_at": iso(),
             "runtime": {
                 "sub_state": "internal",
@@ -1155,7 +1159,7 @@ def test_legacy_customer_login_portal_and_api_compatibility(app_and_bridge):
 def test_customer_online_uses_token_or_active_order_and_records_activity(app_and_bridge):
     app, bridge = app_and_bridge
     admin = TestClient(app)
-    assert admin.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+    assert admin.post("/api/admin/login", json={"username": "admin", "password": "change_me_before_production"}).status_code == 200
     created = admin.post("/api/admin/customers", json={"username": "presence", "password": "123456", "balance_minutes": 60})
     customer = created.json()["customer"]
 
@@ -1195,7 +1199,7 @@ def test_customer_online_uses_token_or_active_order_and_records_activity(app_and
 def test_customer_actions_are_written_to_audit_log(app_and_bridge):
     app, _bridge = app_and_bridge
     admin = TestClient(app)
-    assert admin.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+    assert admin.post("/api/admin/login", json={"username": "admin", "password": "change_me_before_production"}).status_code == 200
 
     user = TestClient(app)
     user.get("/api/captcha")
@@ -1255,7 +1259,7 @@ def test_setup_wizard_skipped_by_default_for_testing(tmp_path):
         "/api/setup/bridge",
         json={
             "admin_username": "admin",
-            "admin_password": "admin123456",
+            "admin_password": "change_me_before_production",
             "bridge_base_url": "http://127.0.0.1:8010",
             "settings": {"system_name": "七元电竞", "privacy_mode_enabled": True, "default_limit_rounds": 6},
         },
@@ -1326,7 +1330,7 @@ def test_setup_wizard_bridge_config_requires_admin_password_when_enforced(tmp_pa
 def test_admin_order_analytics_devices_and_manual_order(app_and_bridge):
     app, bridge = app_and_bridge
     admin = TestClient(app)
-    assert admin.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+    assert admin.post("/api/admin/login", json={"username": "admin", "password": "change_me_before_production"}).status_code == 200
 
     devices = admin.get("/api/admin/devices").json()["devices"]
     assert any(d["id"] == 1 for d in devices)
@@ -1390,7 +1394,7 @@ def test_admin_order_analytics_devices_and_manual_order(app_and_bridge):
 def test_admin_manual_order_modal_matches_legacy_controls(app_and_bridge):
     app, _bridge = app_and_bridge
     admin = TestClient(app)
-    assert admin.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+    assert admin.post("/api/admin/login", json={"username": "admin", "password": "change_me_before_production"}).status_code == 200
     html = admin.get("/merchant-admin").text
     for snippet in [
         '<div class="modal-head">手动下单</div>',
@@ -1426,7 +1430,7 @@ def test_admin_manual_order_modal_matches_legacy_controls(app_and_bridge):
 def test_admin_device_code_and_mode_management(app_and_bridge):
     app, bridge = app_and_bridge
     admin = TestClient(app)
-    assert admin.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+    assert admin.post("/api/admin/login", json={"username": "admin", "password": "change_me_before_production"}).status_code == 200
     html = admin.get("/merchant-admin").text
     for snippet in [
         "openAddDeviceModal",
@@ -1467,7 +1471,7 @@ def test_admin_device_code_and_mode_management(app_and_bridge):
     ]:
         assert snippet in html
 
-    created = admin.post("/api/admin/devices", json={"device_name": "新设备", "device_key": "new-machine-code", "mode": "hybrid", "radar_url": "https://radar.local/x", "watchdog_card": "wd-1"})
+    created = admin.post("/api/admin/devices", json={"device_name": "新设备", "device_key": "new-machine-code", "mode": "hybrid", "radar_url": "https://radar.example.test/x", "watchdog_card": "wd-1"})
     assert created.status_code == 200, created.text
     dev = created.json()["device"]
     assert dev["machine_id"] == "new-machine-code"
@@ -1561,7 +1565,7 @@ def test_admin_devices_reuse_legacy_runtime_fields(app_and_bridge):
         }
     )
     admin = TestClient(app)
-    assert admin.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+    assert admin.post("/api/admin/login", json={"username": "admin", "password": "change_me_before_production"}).status_code == 200
     data = admin.get("/api/admin/devices").json()["devices"]
     row = next(d for d in data if d["id"] == 1)
     assert row["work_status"] == "已进队"
@@ -1581,7 +1585,7 @@ def test_admin_manual_order_infers_device_mode_like_legacy_payload(tmp_path):
     bridge = AbsoluteDeviceBridge(capacity=1)
     app = create_app(db_path=tmp_path / "manual-mode.sqlite", bridge_client=bridge)
     admin = TestClient(app)
-    assert admin.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+    assert admin.post("/api/admin/login", json={"username": "admin", "password": "change_me_before_production"}).status_code == 200
     manual = admin.post("/api/admin/manual-order", json={"device_id": 1, "boss_name": "ABS1234", "run_minutes": 1})
     assert manual.status_code == 200, manual.text
     assert manual.json()["order"]["quality"] == "secret"
@@ -1591,8 +1595,8 @@ def test_manual_order_same_device_concurrency_guard(tmp_path):
     bridge = FakeBridge(capacity=1)
     db = Database(tmp_path / "manual-guard.sqlite")
     service = MerchantService(db, bridge)
-    service.ensure_default_admin("admin", "admin123456")
-    admin = service.authenticate_admin("admin", "admin123456")
+    service.ensure_default_admin("admin", "change_me_before_production")
+    admin = service.authenticate_admin("admin", "change_me_before_production")
 
     def place(i: int):
         try:
@@ -1614,7 +1618,7 @@ def test_manual_order_same_device_concurrency_guard(tmp_path):
 def test_admin_origin_check_and_backup_roundtrip(app_and_bridge):
     app, _bridge = app_and_bridge
     admin = TestClient(app)
-    assert admin.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+    assert admin.post("/api/admin/login", json={"username": "admin", "password": "change_me_before_production"}).status_code == 200
 
     rejected = admin.post("/api/admin/backup", headers={"Origin": "http://evil.example"}, json={})
     assert rejected.status_code == 403
@@ -1708,11 +1712,11 @@ def test_sensitive_auth_failures_auto_ban_ip(app_and_bridge):
         r = client.post("/api/admin/login", json={"username": "admin", "password": "bad-password"}, headers=headers)
         assert r.status_code == 401, r.text
 
-    banned = client.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}, headers=headers)
+    banned = client.post("/api/admin/login", json={"username": "admin", "password": "change_me_before_production"}, headers=headers)
     assert banned.status_code == 429
     assert banned.json()["error"] == "ip_auto_banned"
 
-    other_ip = client.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}, headers={"X-Forwarded-For": "203.0.113.45"})
+    other_ip = client.post("/api/admin/login", json={"username": "admin", "password": "change_me_before_production"}, headers={"X-Forwarded-For": "203.0.113.45"})
     assert other_ip.status_code == 200, other_ip.text
 
     logs = app.state.service.admin_audit_logs(limit=20)
@@ -1722,7 +1726,7 @@ def test_sensitive_auth_failures_auto_ban_ip(app_and_bridge):
 def test_admin_role_management_and_owner_only_mutations(app_and_bridge):
     app, _bridge = app_and_bridge
     owner = TestClient(app)
-    assert owner.post("/api/admin/login", json={"username": "admin", "password": "admin123456"}).status_code == 200
+    assert owner.post("/api/admin/login", json={"username": "admin", "password": "change_me_before_production"}).status_code == 200
 
     created = owner.post("/api/admin/admins", json={"username": "ops", "password": "ops123456", "role": "operator"})
     assert created.status_code == 200, created.text

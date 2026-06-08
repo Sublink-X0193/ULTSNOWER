@@ -177,7 +177,7 @@ POST /api/merchant/v1/devices
   "machine_id": "demo-online-idle",
   "display_name": "示例1 在线空闲",
   "mode": "hybrid",
-  "radar_url": "https://radar.local/demo",
+  "radar_url": "https://radar.example.test/demo",
   "watchdog_card": "",
   "accept_orders": true
 }

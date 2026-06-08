@@ -424,10 +424,15 @@ class MerchantService:
         key = str(getattr(self.bridge, "merchant_key", "") or "")
         secret = str(getattr(self.bridge, "merchant_secret", "") or "")
         # Tests and explicit custom clients should not be blocked; real default
-        # mk_test/secret deployments should show the first-run setup wizard.
+        # development credentials should show the first-run setup wizard when
+        # MERCHANT_REQUIRE_BRIDGE_SETUP=1.
         if self.bridge.__class__.__name__ != "BridgeClient":
             return False
-        return not (key and secret and (key != "mk_test" or secret != "secret"))
+        default_credentials = {
+            ("mk_test", "secret"),
+            ("mk_test", "dev_bridge_merchant_secret"),
+        }
+        return not (key and secret and (key, secret) not in default_credentials)
 
     def update_bridge_config(self, admin: dict[str, Any] | None, *, base_url: str, merchant_key: str, merchant_secret: str) -> dict[str, Any]:
         base_url = str(base_url or "").strip().rstrip("/")

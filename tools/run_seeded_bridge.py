@@ -25,7 +25,8 @@ def main() -> None:
         "sessions.read",
         "sessions.write",
     }
-    bridge.create_api_key(5782, os.environ.get("BRIDGE_MERCHANT_KEY", "mk_test"), os.environ.get("BRIDGE_MERCHANT_SECRET", "secret"), scopes, name="dev merchant")
+    bridge_secret = os.environ.get("BRIDGE_MERCHANT_SECRET", "dev_bridge_merchant_secret")
+    bridge.create_api_key(5782, os.environ.get("BRIDGE_MERCHANT_KEY", "mk_test"), bridge_secret, scopes, name="dev merchant")
     for i in range(1, int(os.environ.get("DEV_BRIDGE_DEVICE_COUNT", "3")) + 1):
         bridge.register_device(5782, f"dev-machine-{i}", f"开发测试机器 {i}", online=True)
 
@@ -33,7 +34,7 @@ def main() -> None:
     port = int(os.environ.get("PORT", "8010"))
     print(f"Seeded Device Control Bridge on http://{host}:{port}")
     print(f"DB: {db_path}")
-    print("API key: mk_test / secret")
+    print(f"API key: mk_test / {bridge_secret}")
     uvicorn.run(app, host=host, port=port)
 
 

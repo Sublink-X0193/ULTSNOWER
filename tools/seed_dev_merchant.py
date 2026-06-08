@@ -13,11 +13,11 @@ def main() -> None:
 
     db_path = Path(os.environ.get("MERCHANT_DB_PATH", str(repo_root / "data" / "merchant.sqlite")))
     service = MerchantService(Database(db_path), bridge_client=None)
-    service.ensure_default_admin(os.environ.get("MERCHANT_ADMIN_USERNAME", "admin"), os.environ.get("MERCHANT_ADMIN_PASSWORD", "admin123456"))
+    service.ensure_default_admin(os.environ.get("MERCHANT_ADMIN_USERNAME", "admin"), os.environ.get("MERCHANT_ADMIN_PASSWORD", "change_me_before_production"))
     for code, minutes in [("TEST-60", 60), ("TEST-180", 180), ("TEST-600", 600)]:
         service.add_recharge_card(code, minutes=minutes)
     print(f"Seeded merchant DB: {db_path}")
-    print("Admin: admin / admin123456")
+    print("Admin: admin / change_me_before_production")
     print("Recharge cards: TEST-60, TEST-180, TEST-600")
 
 

@@ -86,7 +86,7 @@ SQLite 使用 WAL，写路径使用 `BEGIN IMMEDIATE`，并通过 partial unique
 
 ```text
 MERCHANT_ADMIN_USERNAME=admin
-MERCHANT_ADMIN_PASSWORD=admin123456
+MERCHANT_ADMIN_PASSWORD=change_me_before_production
 ```
 
 支持配置：

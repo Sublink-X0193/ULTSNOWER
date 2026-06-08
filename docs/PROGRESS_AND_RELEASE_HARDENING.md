@@ -65,7 +65,7 @@
 
 新增首次配置向导：
 
-- 当真实 BridgeClient 仍使用默认 `mk_test/secret` 且本地未保存 bridge 配置时，访问商户后台登录会跳转 `/setup`。
+- 当真实 BridgeClient 仍使用默认开发凭据且本地未保存 bridge 配置时，访问商户后台登录会跳转 `/setup`。
 - `/setup` 要求输入本地管理员密码，避免未授权访客绑定自己的 API Key。
 - 保存项写入本地数据库 `merchant_settings`：
   - `bridge_base_url`

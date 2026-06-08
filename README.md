@@ -1,6 +1,14 @@
-# SNOW Merchant Portal Server
+# ULTSNOWER / SNOW Merchant Portal Server
 
 独立商户客户服务器 MVP。它从原 `SNOWSERVER` 单体中拆出客户、余额、充值、订单、计时和退款职责；设备、Agent、control session、command、event 仍由中央 `SNOW_DEVICE_CONTROL_BRIDGE` 负责。
+
+本仓库以 MIT License 开源。详见：
+
+- [`LICENSE`](LICENSE)
+- [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- [`SECURITY.md`](SECURITY.md)
+
+> 安全提醒：README 中出现的账号、密码、key 和 secret 都只用于本地开发示例。生产部署必须通过环境变量替换为强随机值。
 
 ## 边界
 
@@ -17,15 +25,17 @@ python -m pip install -e .
 $env:MERCHANT_DB_PATH = "data\merchant.sqlite"
 $env:BRIDGE_BASE_URL = "http://127.0.0.1:8010"
 $env:BRIDGE_MERCHANT_KEY = "mk_test"
-$env:BRIDGE_MERCHANT_SECRET = "secret"
+$env:BRIDGE_MERCHANT_SECRET = "dev_bridge_merchant_secret"
 $env:BRIDGE_API_PREFIX = "/api/external/v1"
 $env:BRIDGE_AUTH_HEADER_PREFIX = "External"
 $env:MERCHANT_ADMIN_USERNAME = "admin"
-$env:MERCHANT_ADMIN_PASSWORD = "admin123456"
+$env:MERCHANT_ADMIN_PASSWORD = "change_me_before_production"
 python -m merchant_portal_server
 ```
 
 默认监听 `127.0.0.1:8020`。
+
+完整环境变量示例见 [`.env.example`](.env.example)。当前程序不自动读取 `.env` 文件；请在 shell、进程管理器或部署平台中设置环境变量。
 
 > 对接当前 `SNOWSERVER` 精简中央服务端时使用默认 `/api/external/v1` +
 > `X-External-*`。若仍联调旧独立 `SNOW_DEVICE_CONTROL_BRIDGE`，可改为
@@ -50,7 +60,7 @@ python -m merchant_portal_server
 
 ```text
 http://127.0.0.1:8020/merchant-admin/login
-admin / admin123456
+admin / change_me_before_production
 ```
 
 测试充值卡：
@@ -64,6 +74,14 @@ TEST-600
 ## 测试
 
 ```powershell
+python -m pytest -q
+```
+
+默认测试不依赖外部仓库。若要额外运行与本机/同级 `SNOWSERVER` 仓库的 live integration 测试：
+
+```powershell
+$env:RUN_LIVE_SNOWSERVER_TESTS = "1"
+$env:SNOWSERVER_REPO = "C:\path\to\SNOWSERVER"
 python -m pytest -q
 ```
 
@@ -111,9 +129,22 @@ python -m pytest -q
 
 ```text
 MERCHANT_ADMIN_USERNAME=admin
-MERCHANT_ADMIN_PASSWORD=admin123456
+MERCHANT_ADMIN_PASSWORD=change_me_before_production
 # 可选：允许非本机 cron/调度器调用 /internal/workers/*
 MERCHANT_INTERNAL_WORKER_TOKEN=change-me-long-random-token
 ```
 
 生产部署前请务必改掉默认密码。
+
+## 发布到 GitHub
+
+```powershell
+git status
+git add .
+git commit -m "Prepare open-source release"
+git branch -M main
+git remote add origin https://github.com/<your-org-or-user>/ULTSNOWER.git
+git push -u origin main
+```
+
+如果远端仓库已存在，请先确认 `git remote -v`，再按实际仓库地址设置 `origin`。
