@@ -1259,7 +1259,7 @@ def test_setup_wizard_skipped_by_default_for_testing(tmp_path):
         "/api/setup/bridge",
         json={
             "admin_username": "admin",
-            "admin_password": "change_me_before_production",
+            "admin_password": "new_setup_password",
             "bridge_base_url": "http://127.0.0.1:8010",
             "settings": {"system_name": "七元电竞", "privacy_mode_enabled": True, "default_limit_rounds": 6},
         },
@@ -1269,6 +1269,7 @@ def test_setup_wizard_skipped_by_default_for_testing(tmp_path):
     assert public_settings["system_name"] == "七元电竞"
     assert public_settings["privacy_mode_enabled"] is True
     assert client.get("/api/setup/status").json()["configured"] is False
+    assert client.post("/api/admin/login", json={"username": "admin", "password": "new_setup_password"}).status_code == 200
 
 
 def test_setup_wizard_bridge_config_requires_admin_password_when_enforced(tmp_path):

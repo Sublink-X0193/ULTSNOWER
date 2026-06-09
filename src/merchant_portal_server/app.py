@@ -550,7 +550,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     def api_setup_bridge(request: Request, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
         admin = maybe_admin(request)
         if not admin:
-            if setup_required_effective():
+            if service.bridge_setup_required():
                 admin = service.configure_initial_owner_admin(
                     username=body.get("admin_username") or settings.default_admin_username,
                     password=body.get("admin_password") or "",
