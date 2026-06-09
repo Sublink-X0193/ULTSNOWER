@@ -274,6 +274,17 @@ def test_team_code_allows_alo5045(app_and_bridge):
     assert order.json()["order"]["team_code"] == "ALO5045"
 
 
+def test_admin_manual_order_numeric_validation_accepts_plain_digits(app_and_bridge):
+    app, _bridge = app_and_bridge
+    client = TestClient(app)
+    assert client.post("/api/admin/login", json={"username": "admin", "password": "change_me_before_production"}).status_code == 200
+    html = client.get("/merchant-admin").text
+    assert "/^[0-9]+$/.test(maxRoundsInput)" in html
+    assert "/^[0-9]+$/.test(maxCoinLossInput)" in html
+    assert "!/^\\\\d+$/.test(maxRoundsInput)" not in html
+    assert "!/^\\\\d+$/.test(maxCoinLossInput)" not in html
+
+
 def test_register_login_recharge(app_and_bridge):
     app, _bridge = app_and_bridge
     client = TestClient(app)

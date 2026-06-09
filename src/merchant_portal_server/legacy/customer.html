@@ -2255,7 +2255,7 @@
                 if (typeof raw === 'number') return raw;
                 const text = String(raw).replace(/,/g, '').trim();
                 if (!text) return 0;
-                const m = text.match(/(-?\d+(?:\.\d+)?)\s*(万|w|W)?/);
+                const m = text.match(/(-?[0-9]+(?:\.[0-9]+)?)\s*(万|w|W)?/);
                 if (!m) return 0;
                 const n = parseFloat(m[1]);
                 if (!Number.isFinite(n)) return 0;

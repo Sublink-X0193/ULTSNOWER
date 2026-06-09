@@ -3527,8 +3527,8 @@ async function submitManualOrder() {
   if (!bossName) { appAlert('请输入组队码'); return; }
   if (!validateBossName(bossName)) { appAlert('组队码格式错误：前3位为字母，后4位为数字（如 ABC1234）'); return; }
   if (runMinutes <= 0) { appAlert('请填写有效的运行时长'); return; }
-  if (maxRoundsInput && !/^\\d+$/.test(maxRoundsInput)) { appAlert('限制局数必须为纯数字'); return; }
-  if (maxCoinLossInput && !/^\\d+$/.test(maxCoinLossInput)) { appAlert('限制亏币必须为纯数字'); return; }
+  if (maxRoundsInput && !/^[0-9]+$/.test(maxRoundsInput)) { appAlert('限制局数必须为纯数字'); return; }
+  if (maxCoinLossInput && !/^[0-9]+$/.test(maxCoinLossInput)) { appAlert('限制亏币必须为纯数字'); return; }
 
   const maxRounds = parseInt(maxRoundsInput) || 0;
   const maxCoinLoss = parseInt(maxCoinLossInput) || 0;
