@@ -11,7 +11,7 @@
 
 ## 运行安全建议
 
-- 生产环境必须覆盖默认管理员密码和所有 Bridge/API secret。
+- 生产环境必须覆盖默认管理员密码和所有真实凭据。
 - 不要把 `.env`、SQLite 数据库、日志或真实卡密提交到仓库。
-- `/internal/*` 若需要跨主机调用，请设置强随机 `MERCHANT_INTERNAL_WORKER_TOKEN`。
+- 内部任务接口若需要跨主机调用，请设置强随机 `MERCHANT_INTERNAL_WORKER_TOKEN`。
 - 请将服务部署在可信反向代理之后，并启用 HTTPS。
