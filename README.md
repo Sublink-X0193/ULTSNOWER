@@ -1,6 +1,6 @@
-# ULTSNOWER
+# SNOWER 开源代起装商户服务端
 
-ULTSNOWER 是一个面向商户自助运营场景的 Web 服务，提供客户账户、余额、充值、订单、后台管理和运营配置能力。
+SNOWER 开源代起装商户服务端是一个面向商户自助运营场景的 Web 服务，提供客户账户、余额、充值、订单、后台管理和运营配置能力。
 
 本仓库以 MIT License 开源。详见：
 
@@ -102,8 +102,10 @@ git status
 git add .
 git commit -m "Prepare open-source release"
 git branch -M main
-git remote add origin https://github.com/<your-org-or-user>/ULTSNOWER.git
+git remote add origin https://github.com/<your-org-or-user>/SNOWER.git
 git push -u origin main
 ```
 
 如果远端仓库已存在，请先确认 `git remote -v`，再按实际仓库地址设置 `origin`。
+
+

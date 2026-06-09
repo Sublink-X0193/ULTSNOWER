@@ -1,6 +1,6 @@
 # Contributing
 
-感谢你愿意参与 ULTSNOWER。
+感谢你愿意参与 SNOWER 开源代起装商户服务端。
 
 ## 本地开发
 
@@ -22,3 +22,4 @@ python -m pytest -q
 1. 改动目的。
 2. 主要行为变化。
 3. 已运行的测试命令。
+

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "snow-merchant-portal-server"
 version = "0.1.0"
-description = "Independent SNOW merchant customer portal server MVP"
+description = "SNOWER 开源代起装商户服务端"
 requires-python = ">=3.12"
 dependencies = [
   "fastapi>=0.110",
@@ -32,3 +32,4 @@ merchant_portal_server = ["legacy/*.html"]
 pythonpath = ["src"]
 testpaths = ["tests"]
 addopts = "-q"
+
