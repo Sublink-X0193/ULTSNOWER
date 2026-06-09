@@ -381,6 +381,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
         cfg = service.bridge_config_view()
         raw_required = bool(cfg.get("setup_required"))
         cfg["setup_required_raw"] = raw_required
+        cfg["setup_completed"] = service.setup_completed()
         cfg["setup_enforced"] = bool(settings.require_bridge_setup)
         cfg["setup_required"] = bool(settings.require_bridge_setup and raw_required)
         full_settings = admin_settings_view(service.get_settings())
@@ -537,7 +538,8 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     @app.get("/setup", response_class=HTMLResponse)
     def setup_page(request: Request) -> HTMLResponse:
         admin = maybe_admin(request)
-        if not admin and not service.bridge_setup_required():
+        first_run_setup_open = (not service.setup_completed()) and service.bridge_setup_required()
+        if not admin and not first_run_setup_open:
             return RedirectResponse("/login", status_code=303)  # type: ignore[return-value]
         cfg = setup_config_view(redact_sensitive=not bool(admin))
         return HTMLResponse(_setup_html(cfg, require_admin_password=not bool(admin)))
@@ -550,7 +552,8 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
     def api_setup_bridge(request: Request, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
         admin = maybe_admin(request)
         if not admin:
-            if service.bridge_setup_required():
+            first_run_setup_open = (not service.setup_completed()) and service.bridge_setup_required()
+            if first_run_setup_open:
                 admin = service.configure_initial_owner_admin(
                     username=body.get("admin_username") or settings.default_admin_username,
                     password=body.get("admin_password") or "",
@@ -590,6 +593,7 @@ def create_app(*, db_path: str | Path | None = None, bridge_client: Any | None =
                 )
                 service.bridge = new_bridge
                 app.state.bridge = new_bridge
+        service.mark_setup_completed(admin)
         msg = "首次配置已保存" if not has_bridge_credentials else "全局设置与接入信息已保存"
         return json_ok(msg=msg, bridge=setup_config_view(), settings=admin_settings_view(service.get_settings()), redirect="/login")
 

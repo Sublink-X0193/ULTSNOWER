@@ -216,6 +216,21 @@ class MerchantService:
             (key, value, iso()),
         )
 
+    def setup_completed(self) -> bool:
+        with self.db.connect() as con:
+            return self._get_state(con, "setup_completed", "0") in {"1", "true", "TRUE", "yes"}
+
+    def mark_setup_completed(self, admin: dict[str, Any] | None = None) -> None:
+        with self.db.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            try:
+                self._set_state(con, "setup_completed", "1")
+                self._log_admin_action_locked(con, admin, "setup_completed", "setup", None, {})
+                con.commit()
+            except Exception:
+                con.rollback()
+                raise
+
     def _put_setting_locked(self, con: sqlite3.Connection, key: str, value: Any, admin_id: int | None = None) -> None:
         con.execute(
             """INSERT INTO merchant_settings(key,value_json,updated_at,updated_by_admin_id)

@@ -1269,7 +1269,13 @@ def test_setup_wizard_skipped_by_default_for_testing(tmp_path):
     assert public_settings["system_name"] == "七元电竞"
     assert public_settings["privacy_mode_enabled"] is True
     assert client.get("/api/setup/status").json()["configured"] is False
+    setup_after_first_save = client.get("/setup", follow_redirects=False)
+    assert setup_after_first_save.status_code == 303
+    assert setup_after_first_save.headers["location"] == "/login"
     assert client.post("/api/admin/login", json={"username": "admin", "password": "new_setup_password"}).status_code == 200
+    setup_as_admin = client.get("/setup", follow_redirects=False)
+    assert setup_as_admin.status_code == 200
+    assert "首次配置服务接入 / 全局设置" in setup_as_admin.text
 
 
 def test_setup_wizard_bridge_config_requires_admin_password_when_enforced(tmp_path):
