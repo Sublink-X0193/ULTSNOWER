@@ -17,7 +17,7 @@ from merchant_portal_server.app import create_app
 from merchant_portal_server.bridge_client import BridgeClient, BridgeClientError
 from merchant_portal_server.config import Settings
 from merchant_portal_server.db import Database, iso, utcnow
-from merchant_portal_server.service import MerchantError, MerchantService
+from merchant_portal_server.service import MerchantError, MerchantService, normalize_team_code
 
 
 class FakeBridge:
@@ -260,6 +260,18 @@ def register_and_login(client: TestClient, username: str = "alice") -> dict[str,
     r = client.post("/api/register", json={"username": username, "password": "123456", "captcha": captcha})
     assert r.status_code == 200, r.text
     return r.json()["customer"]
+
+
+def test_team_code_allows_alo5045(app_and_bridge):
+    app, _bridge = app_and_bridge
+    assert normalize_team_code("ALO5045") == "ALO5045"
+    client = TestClient(app)
+    register_and_login(client, "alo_user")
+    app.state.service.add_recharge_card("ALO-10", minutes=10)
+    assert client.post("/api/recharge/redeem", json={"code": "ALO-10"}).status_code == 200
+    order = client.post("/api/orders", json={"requested_minutes": 5, "team_code": "ALO5045"})
+    assert order.status_code == 200, order.text
+    assert order.json()["order"]["team_code"] == "ALO5045"
 
 
 def test_register_login_recharge(app_and_bridge):

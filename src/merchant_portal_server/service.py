@@ -161,7 +161,7 @@ class MerchantError(RuntimeError):
         self.status_code = status_code
 
 
-TEAM_CODE_RE = re.compile(r"^[A-Z]{3}\d{4}$")
+TEAM_CODE_RE = re.compile(r"^[A-Z]{3}[0-9]{4}$")
 TEAM_CODE_FORMAT_MESSAGE = "组队码格式错误：前3位为字母，后4位为数字（如 ABC1234）"
 
 
@@ -3155,3 +3155,4 @@ class MerchantService:
                 fixed += 1
         poll = self.poll_events_once()
         return {"checked": checked, "fixed": fixed, "poll": poll}
+

@@ -2647,7 +2647,7 @@
         }
 
         function validateBossName(name) {
-            return /^[A-Z]{3}\d{4}$/.test(normalizeBossName(name));
+            return /^[A-Z]{3}[0-9]{4}$/.test(normalizeBossName(name));
         }
 
         async function submitOrder() {
@@ -3343,3 +3343,4 @@
 </body>
 
 </html>
+

@@ -3414,7 +3414,7 @@ function getManualEffectiveMode() {
   return _manualOrderMode;
 }
 function normalizeBossName(name) { return String(name || '').trim().toUpperCase().replace(/[\\s-]+/g, ''); }
-function validateBossName(name) { return /^[A-Z]{3}\\d{4}$/.test(normalizeBossName(name)); }
+function validateBossName(name) { return /^[A-Z]{3}[0-9]{4}$/.test(normalizeBossName(name)); }
 function appAlert(msg) { toast(msg); }
 function formatMinutes(m) { return fmtMin(m); }
 function updateManualOrderMode() {
@@ -4072,3 +4072,4 @@ loadAll().then(loadSettings).catch(e => toast(e.message));
         .replace("__ROLE_LABEL__", _escape(role_label))
         .replace("__ROLE__", _escape(role))
     )
+
